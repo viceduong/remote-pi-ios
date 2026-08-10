@@ -101,13 +101,13 @@ struct ChatView: View {
                                 }
                                 if message.id == visibleMessages.last?.id {
                                     isAtBottom = true
-                                    withAnimation { showScrollToBottom = false }
+                                    showScrollToBottom = false
                                 }
                             }
                             .onDisappear {
                                 if message.id == visibleMessages.last?.id {
                                     isAtBottom = false
-                                    withAnimation { showScrollToBottom = true }
+                                    showScrollToBottom = true
                                 }
                             }
                         }
@@ -132,11 +132,18 @@ struct ChatView: View {
                         .padding(.bottom, 10)
                     }
                 }
-                // Follow the stream only while the user is at the bottom — never
-                // fight their scroll. Non-animated jumps keep it smooth.
+                // Follow the stream while at the bottom — smooth animated jump
+                // (deltas are coalesced, so this fires only on new messages).
                 .onChange(of: viewModel.messages.count) { _ in
                     if isAtBottom {
-                        scrollToBottom(proxy, animated: false)
+                        scrollToBottom(proxy, animated: true)
+                    }
+                }
+                // Pagination: keep position when older messages are prepended.
+                .onChange(of: viewModel.prependAnchor) { _ in
+                    if let anchor = viewModel.prependAnchor {
+                        proxy.scrollTo(anchor, anchor: .top)
+                        viewModel.consumePrependAnchor()
                     }
                 }
             }
@@ -279,7 +286,7 @@ struct ChatView: View {
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
         if let last = visibleMessages.last {
             if animated {
-                withAnimation(.easeOut(duration: 0.25)) {
+                withAnimation(.easeInOut(duration: 0.3)) {
                     proxy.scrollTo(last.id, anchor: .bottom)
                 }
             } else {

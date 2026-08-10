@@ -15,6 +15,20 @@ settings:
     CODE_SIGN_STYLE: Automatic
 
 targets:
+  AiChing:
+    type: application
+    platform: iOS
+    sources:
+      - AiChing
+    info:
+      path: AiChing/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aiching.app
+        INFOPLIST_FILE: AiChing/Info.plist
+        IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    dependencies: []
+
   RemotePi:
     type: application
     platform: iOS
@@ -24,8 +38,8 @@ targets:
       path: RemotePi/Info.plist
       properties:
         CFBundleDisplayName: Remote Pi
-        CFBundleShortVersionString: "4.3"
-        CFBundleVersion: "33"
+        CFBundleShortVersionString: "4.4"
+        CFBundleVersion: "34"
         LSRequiresIPhoneOS: true
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true

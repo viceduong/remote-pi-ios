@@ -33,6 +33,9 @@ final class ChatViewModel: ObservableObject {
     /// smooth instead of re-rendering per token.
     private var pendingDelta = ""
     private var flushTask: Task<Void, Never>?
+    /// Set when older messages are prepended — the list scrolls back to this
+    /// anchor so pagination doesn't visually jump.
+    @Published var prependAnchor: String?
     /// Set when the host pi agent owns the session — needs user confirmation
     /// before we resume it from the app (would double-write the session file).
     @Published var confirmLiveResume = false
@@ -180,11 +183,18 @@ final class ChatViewModel: ObservableObject {
                 hasMore = page.hasMore
                 return
             }
+            // Remember the current top so the list can keep its position.
+            prependAnchor = messages.first?.id.uuidString
             messages.insert(contentsOf: fresh, at: 0)
             hasMore = page.hasMore
         } catch {
             // transient — leave hasMore as-is so a later scroll retries
         }
+    }
+
+    /// Called after the view scrolls back to the prepend anchor.
+    func consumePrependAnchor() {
+        prependAnchor = nil
     }
 
     // MARK: - SSE

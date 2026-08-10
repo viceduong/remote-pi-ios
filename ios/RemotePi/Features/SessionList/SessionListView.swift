@@ -58,7 +58,7 @@ struct SessionListView: View {
                         .font(.footnote)
                         .foregroundColor(.secondary)
                 }
-                ForEach(filteredSessions) { session in
+                ForEach(Array(filteredSessions.enumerated()), id: \.element.id) { index, session in
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 3) {
                             HStack(spacing: 6) {
@@ -119,6 +119,12 @@ struct SessionListView: View {
                     .padding(6)
                     .background(session.writing == true ? theme.terminalText.opacity(0.08) : Color.clear)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .onAppear {
+                        // Prefetch the next page before hitting the very bottom.
+                        if index >= filteredSessions.count - 3 {
+                            Task { await loadMore() }
+                        }
+                    }
                     .contentShape(Rectangle())
                     .onTapGesture { openSession = session }
                     .swipeActions(edge: .trailing) {
