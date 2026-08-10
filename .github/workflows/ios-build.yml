@@ -14,9 +14,9 @@ jobs:
       - name: Install XcodeGen
         run: |
           curl -sL https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip -o /tmp/xcodegen.zip
-          cd /tmp && unzip -q xcodegen.zip -d xcodegen
-          echo "/tmp/xcodegen/bin" >> $GITHUB_PATH
-          export PATH="/tmp/xcodegen/bin:$PATH"
+          cd /tmp && unzip -q xcodegen.zip -d xcgen
+          echo "/tmp/xcgen/xcodegen/bin" >> $GITHUB_PATH
+          export PATH="/tmp/xcgen/xcodegen/bin:$PATH"
           xcodegen --version
       - name: Generate Xcode Project
         run: |
@@ -49,9 +49,9 @@ jobs:
       - name: Install XcodeGen
         run: |
           curl -sL https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip -o /tmp/xcodegen.zip
-          cd /tmp && unzip -q xcodegen.zip -d xcodegen
-          echo "/tmp/xcodegen/bin" >> $GITHUB_PATH
-          export PATH="/tmp/xcodegen/bin:$PATH"
+          cd /tmp && unzip -q xcodegen.zip -d xcgen
+          echo "/tmp/xcgen/xcodegen/bin" >> $GITHUB_PATH
+          export PATH="/tmp/xcgen/xcodegen/bin:$PATH"
           xcodegen --version
       - name: Generate Xcode Project
         run: |
