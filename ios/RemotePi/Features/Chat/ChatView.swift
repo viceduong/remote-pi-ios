@@ -136,7 +136,19 @@ struct ChatView: View {
                 // (deltas are coalesced, so this fires only on new messages).
                 .onChange(of: viewModel.messages.count) { _ in
                     if isAtBottom {
-                        scrollToBottom(proxy, animated: true)
+                        // Wait for the new rows to lay out before scrolling
+                        // (scrollTo is a no-op against unrendered ids).
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                            if isAtBottom { scrollToBottom(proxy, animated: true) }
+                        }
+                    }
+                }
+                .onChange(of: viewModel.isLoadingHistory) { loading in
+                    // Initial history load: scroll to the bottom once rendered.
+                    if !loading && isAtBottom {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                            if isAtBottom { scrollToBottom(proxy, animated: false) }
+                        }
                     }
                 }
                 // Pagination: keep position when older messages are prepended.
