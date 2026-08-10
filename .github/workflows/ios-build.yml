@@ -16,6 +16,7 @@ jobs:
           curl -sL https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip -o /tmp/xcodegen.zip
           cd /tmp && unzip -q xcodegen.zip -d xcodegen
           echo "/tmp/xcodegen/bin" >> $GITHUB_PATH
+          export PATH="/tmp/xcodegen/bin:$PATH"
           xcodegen --version
       - name: Generate Xcode Project
         run: |
@@ -50,6 +51,7 @@ jobs:
           curl -sL https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip -o /tmp/xcodegen.zip
           cd /tmp && unzip -q xcodegen.zip -d xcodegen
           echo "/tmp/xcodegen/bin" >> $GITHUB_PATH
+          export PATH="/tmp/xcodegen/bin:$PATH"
           xcodegen --version
       - name: Generate Xcode Project
         run: |
