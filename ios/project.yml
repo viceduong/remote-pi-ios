@@ -1,0 +1,82 @@
+name: AiChing
+options:
+  bundleIdPrefix: com.aiching
+  deploymentTarget:
+    iOS: "15.0"
+  xcodeVersion: "14.0"
+  createIntermediateGroups: false
+  generateEmptyDirectories: false
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    TARGETED_DEVICE_FAMILY: "1"
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  AiChing:
+    type: application
+    platform: iOS
+    sources:
+      - AiChing
+    info:
+      path: AiChing/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aiching.app
+        INFOPLIST_FILE: AiChing/Info.plist
+        IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    dependencies: []
+
+  RemotePi:
+    type: application
+    platform: iOS
+    sources:
+      - RemotePi
+    info:
+      path: RemotePi/Info.plist
+      properties:
+        CFBundleDisplayName: Remote Pi
+        CFBundleShortVersionString: "4.3"
+        CFBundleVersion: "33"
+        LSRequiresIPhoneOS: true
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: Remote Pi connects to your pi agent server on your local network or Tailscale VPN.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UILaunchScreen: {}
+        UIRequiredDeviceCapabilities:
+          - arm64
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aiching.remotepi
+        INFOPLIST_FILE: RemotePi/Info.plist
+        IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_STRICT_CONCURRENCY: minimal
+    dependencies: []
+    scheme:
+      testTargets:
+        - RemotePiTests
+
+  RemotePiTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - RemotePiTests
+    dependencies:
+      - target: RemotePi
+    settings:
+      base:
+        IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        GENERATE_INFOPLIST_FILE: YES

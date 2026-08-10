@@ -1,0 +1,55 @@
+name: Build iOS App
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-remote-pi:
+    name: Build RemotePi (iOS 15)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode Project
+        run: |
+          cd ios
+          xcodegen generate --spec project.yml
+      - name: Build RemotePi
+        run: |
+          cd ios
+          xcodebuild -project AiChing.xcodeproj -scheme RemotePi \
+            -destination 'generic/platform=iOS' -configuration Debug clean build \
+            CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
+      - name: Package .ipa
+        run: |
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name 'RemotePi.app' -type d -path '*/Debug-iphoneos/*' | head -1)
+          mkdir -p Payload && cp -R "$APP_PATH" Payload/
+          zip -r RemotePi.ipa Payload/
+      - name: Upload .ipa
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: RemotePi-ipa
+          path: RemotePi.ipa
+          retention-days: 14
+
+  test-remote-pi:
+    name: Test RemotePi (unit)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode Project
+        run: |
+          cd ios
+          xcodegen generate --spec project.yml
+      - name: Run unit tests
+        run: |
+          cd ios
+          xcodebuild test -project AiChing.xcodeproj -scheme RemotePi \
+            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            CODE_SIGNING_ALLOWED=NO
