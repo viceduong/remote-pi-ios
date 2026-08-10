@@ -10,9 +10,13 @@ jobs:
     name: Build RemotePi (iOS 15)
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install XcodeGen
-        run: brew install xcodegen
+        run: |
+          curl -sL https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip -o /tmp/xcodegen.zip
+          cd /tmp && unzip -q xcodegen.zip -d xcodegen
+          echo "/tmp/xcodegen/bin" >> $GITHUB_PATH
+          xcodegen --version
       - name: Generate Xcode Project
         run: |
           cd ios
@@ -40,9 +44,13 @@ jobs:
     name: Test RemotePi (unit)
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install XcodeGen
-        run: brew install xcodegen
+        run: |
+          curl -sL https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip -o /tmp/xcodegen.zip
+          cd /tmp && unzip -q xcodegen.zip -d xcodegen
+          echo "/tmp/xcodegen/bin" >> $GITHUB_PATH
+          xcodegen --version
       - name: Generate Xcode Project
         run: |
           cd ios
