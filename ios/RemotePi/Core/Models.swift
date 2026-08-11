@@ -31,6 +31,10 @@ struct SessionSummary: Codable, Identifiable, Hashable {
     let lastActivityAt: Int
     /// Actual last message time (pi bumps mtime on open).
     let lastMessageAt: Int?
+    /// Runtime phase: idle/streaming/awaitingInput/terminated.
+    let phase: String?
+    /// Who owns the agent runtime: none/terminal/bridge.
+    let owner: String?
     let error: String?
     /// 'app' = created in RemotePi; 'pi' = pre-existing host session.
     let source: String?
