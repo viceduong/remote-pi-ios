@@ -24,8 +24,8 @@ targets:
       path: RemotePi/Info.plist
       properties:
         CFBundleDisplayName: Remote Pi
-        CFBundleShortVersionString: "5.13"
-        CFBundleVersion: "53"
+        CFBundleShortVersionString: "5.14"
+        CFBundleVersion: "54"
         LSRequiresIPhoneOS: true
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true

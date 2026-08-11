@@ -212,12 +212,6 @@ struct ChatView: View {
         // fixed-height reservation above the input stops viewport jumps.
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
-                // Reservation at the TOP: keeps the total inset height constant
-                // (viewport never jumps when bars toggle) while the composer
-                // always stays flush to the bottom — no gap between a visible
-                // banner and the input.
-                Color.clear.frame(height: max(0, 56 - (viewModel.workingText != nil ? 29 : 0) - (viewModel.queuedNote != nil ? 27 : 0)))
-
                 if let work = viewModel.workingText {
                     HStack(spacing: 8) {
                         ProgressView()
@@ -231,6 +225,8 @@ struct ChatView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .background(theme.accent.opacity(0.10))
+                } else {
+                    Color.clear.frame(height: 28)
                 }
 
                 if let note = viewModel.queuedNote {
@@ -243,6 +239,10 @@ struct ChatView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .background(Color.orange.opacity(0.15))
+                } else if viewModel.workingText == nil {
+                    // Collapse the empty queued slot when the working banner is
+                    // showing — no 26pt gap between it and the input.
+                    Color.clear.frame(height: 26)
                 }
 
                 ComposerView(viewModel: viewModel)
