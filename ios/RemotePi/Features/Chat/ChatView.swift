@@ -122,6 +122,11 @@ struct ChatView: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 12)
+                    // Reliable open-at-bottom: offset clamp (bounded, no loop).
+                    .background(ScrollBottomClamp(
+                        trigger: !didClampInitial && !viewModel.messages.isEmpty,
+                        onClamped: { didClampInitial = true }
+                    ))
 
                     // Bottom marker: reports its maxY in the scroll space.
                     Color.clear.frame(height: 1)
@@ -161,19 +166,27 @@ struct ChatView: View {
                 // onAppear/onDisappear flicker, so scrolling up is never yanked
                 // back. Follow: one-shot initial, then throttled 250ms, both
                 // non-animated, only while within 200pt of the bottom.
+                // Marker only updates STATE (nearBottom for the gate + button
+                // visibility) — it must NOT drive scrolling: programmatic
+                // scrolls move the marker, which would self-trigger follow
+                // forever (the infinite-scroll-on-open loop).
                 .onPreferenceChange(BottomMarkerKey.self) { markerY in
                     let distance = markerY - geo.size.height
-                    let nearBottom = distance <= 200
+                    nearBottom = distance <= 200
                     let showBtn = distance > 200
                     if showBtn != showScrollToBottom { showScrollToBottom = showBtn }
-                    if nearBottom && !isUserScrolling {
-                        if !didInitialScroll {
-                            didInitialScroll = true
-                            scrollToBottom(proxy, animated: false)
-                        } else if Date().timeIntervalSince(lastAutoScroll) > 0.25 {
-                            lastAutoScroll = Date()
-                            scrollToBottom(proxy, animated: false)
-                        }
+                }
+                // Follow fires ONLY on real new messages (count change), gated
+                // by being near the bottom and the user not scrolling. The
+                // one-shot didInitialScroll lands the first page at the bottom.
+                .onChange(of: viewModel.messages.count) { _ in
+                    guard nearBottom, !isUserScrolling else { return }
+                    if !didInitialScroll {
+                        didInitialScroll = true
+                        scrollToBottom(proxy, animated: false)
+                    } else if Date().timeIntervalSince(lastAutoScroll) > 0.25 {
+                        lastAutoScroll = Date()
+                        scrollToBottom(proxy, animated: false)
                     }
                 }
             }
