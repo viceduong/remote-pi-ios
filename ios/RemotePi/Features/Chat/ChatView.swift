@@ -188,7 +188,7 @@ struct ChatView: View {
                         .padding(.vertical, 6)
                         .background(theme.accent.opacity(0.10))
                     } else {
-                        Color.clear.frame(height: 12)
+                        Color.clear.frame(height: 28)
                     }
 
                     if let note = viewModel.queuedNote {
@@ -202,7 +202,7 @@ struct ChatView: View {
                         .padding(.vertical, 6)
                         .background(Color.orange.opacity(0.15))
                     } else {
-                        Color.clear.frame(height: 12)
+                        Color.clear.frame(height: 26)
                     }
                 }
                 ComposerView(viewModel: viewModel)
