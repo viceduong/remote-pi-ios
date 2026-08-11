@@ -16,29 +16,34 @@ enum ChatMerger {
         }
     }
 
-    /// Append `tail` to `existing`. Dedupes by entry id; for same-role
-    /// continuations of the last bubble (partial vs full text, or the same
-    /// entry arriving from SSE and the file) it REPLACES the last bubble
-    /// instead of appending a second copy.
+    /// Append `tail` to `existing`. Rules, in order:
+    /// 1. Same entry id on the last bubble -> replace with the fuller copy
+    ///    (SSE finalize vs file_update carry the same id, different lengths).
+    /// 2. Strict text continuation of the last bubble (same role, close ts,
+    ///    longer text starting with the partial) -> replace.
+    /// 3. Otherwise dedupe by entry id / text-head + timestamp window.
     static func append(_ existing: inout [ChatMessage], _ tail: [ChatMessage]) {
         var toAdd: [ChatMessage] = []
         for m in tail {
-            if isDuplicate(m, in: existing) { continue }
             if let lastIdx = existing.indices.last {
                 let last = existing[lastIdx]
                 if last.role == m.role {
                     let a = last.text
                     let b = m.text
                     let sameEntry = last.entryId != nil && last.entryId == m.entryId
-                    let continuation = (a.isEmpty && !b.isEmpty)
-                        || (b.hasPrefix(a) && a.count > 20)
-                        || (a.hasPrefix(b) && b.count > 20)
-                    if sameEntry || continuation {
-                        existing[lastIdx] = m // replace with the fuller copy
+                    if sameEntry {
+                        if a != b { existing[lastIdx] = m }
+                        continue
+                    }
+                    let tsClose = abs((last.timestamp ?? 0) - (m.timestamp ?? 0)) < 3000
+                    let continuation = tsClose && b.count > a.count && b.hasPrefix(a) && a.count >= 10
+                    if continuation {
+                        existing[lastIdx] = m
                         continue
                     }
                 }
             }
+            if isDuplicate(m, in: existing) { continue }
             toAdd.append(m)
         }
         if !toAdd.isEmpty { existing.append(contentsOf: toAdd) }
