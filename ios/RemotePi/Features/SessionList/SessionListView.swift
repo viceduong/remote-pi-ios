@@ -239,7 +239,7 @@ struct SessionListView: View {
             let known = Set(sessions.map { $0.id })
             let fresh = page.sessions.filter { !known.contains($0.id) }
             guard !fresh.isEmpty else {
-                hasMore = page.hasMore
+                hasMore = false // duplicates only — no more new content (infinite-scroll guard)
                 return
             }
             sessions.append(contentsOf: fresh)

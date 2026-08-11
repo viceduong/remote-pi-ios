@@ -133,16 +133,19 @@ struct APIClient {
     }
 
     /// GET /api/sessions/:id/messages — last N messages, paginated with `before`.
-    func fetchMessages(_ id: String, limit: Int = 100, before: Int? = nil) async throws -> (messages: [ChatMessage], hasMore: Bool, total: Int) {
+    func fetchMessages(_ id: String, limit: Int = 100, before: Int? = nil) async throws -> (messages: [ChatMessage], hasMore: Bool, total: Int, pending: [String]) {
+        struct Pending: Decodable { let text: String }
         struct Wrapper: Decodable {
             let messages: [WireMessage]
             let hasMore: Bool?
             let total: Int?
+            let pending: [Pending]?
         }
         var query = "?limit=\(limit)"
         if let before { query += "&before=\(before)" }
         let wrapper: Wrapper = try await get("/api/sessions/\(id)/messages\(query)")
-        return (wrapper.messages.map { $0.toChatMessage() }, wrapper.hasMore ?? false, wrapper.total ?? 0)
+        return (wrapper.messages.map { $0.toChatMessage() }, wrapper.hasMore ?? false,
+                wrapper.total ?? 0, wrapper.pending?.map(\.text) ?? [])
     }
 
     func sendTurn(_ id: String, message: String, force: Bool = false) async throws -> TurnResponse {

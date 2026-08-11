@@ -20,6 +20,9 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var isStreaming = false
     @Published private(set) var connectionState: ConnectionState = .disconnected
     @Published private(set) var hasMore = false
+    /// Server-owned queued prompts (rendered as pending bubbles — never vanish).
+    @Published private(set) var pendingMessages: [String] = []
+    /// Server-owned queued prompts (rendered as pending bubbles — never vanish).
     @Published private(set) var isLoadingHistory = true
     /// Live "what the assistant is doing" label (Working/Thinking/Running tool…).
     @Published private(set) var workingText: String?
@@ -88,6 +91,7 @@ final class ChatViewModel: ObservableObject {
 
     private func refreshFromServer() async {
         guard let page = try? await client.fetchMessages(sessionId, limit: 200) else { return }
+        pendingMessages = page.pending
         // Watchdog: clear the host-driven working indicator if the host agent
         // has been quiet for a while (no turn_end arrives in the file stream).
         if let t = fileActivityAt, Date().timeIntervalSince(t) > 25 {
@@ -124,6 +128,7 @@ final class ChatViewModel: ObservableObject {
             if resp.queued {
                 queuedNote = "⏳ Queued — agent is busy, your message will go in when it finishes"
                 workingText = nil
+                if !pendingMessages.contains(trimmed) { pendingMessages.append(trimmed) }
             }
         } catch {
             isStreaming = false
@@ -164,6 +169,7 @@ final class ChatViewModel: ObservableObject {
             let page = try await client.fetchMessages(sessionId, limit: 100)
             messages = page.messages
             hasMore = page.hasMore
+            pendingMessages = page.pending
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -183,7 +189,7 @@ final class ChatViewModel: ObservableObject {
             let known = Set(messages.compactMap { $0.entryId })
             let fresh = page.messages.filter { $0.entryId == nil || !known.contains($0.entryId!) }
             guard !fresh.isEmpty else {
-                hasMore = page.hasMore
+                hasMore = false // duplicates only — no more new content (infinite-scroll guard)
                 return
             }
             // Remember the current top so the list can keep its position.
@@ -267,6 +273,11 @@ final class ChatViewModel: ObservableObject {
         case "agent_exited":
             isStreaming = false
             connectionState = .disconnected
+        case "agent_crashed":
+            // Server auto-respawns; surface it instead of a silent stop.
+            isStreaming = false
+            workingText = "Agent crashed — restarting…"
+            fileActivityAt = Date()
         case "file_update":
             // Host/other-client activity pushed by the server's file watcher.
             if let msg = obj["message"] as? [String: Any] {
@@ -274,6 +285,10 @@ final class ChatViewModel: ObservableObject {
                 if role == "user" {
                     workingText = nil
                     isStreaming = false
+                    let text = (msg["text"] as? String) ?? ""
+                    if !text.isEmpty {
+                        pendingMessages.removeAll { $0 == text }
+                    }
                 } else {
                     workingText = role == "tool" ? "Running tool…" : "Writing…"
                     isStreaming = true
