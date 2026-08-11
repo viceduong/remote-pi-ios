@@ -24,6 +24,9 @@ struct ChatView: View {
     @State private var scrolledToBottom = false
     @State private var focusItem: ToolFocusItem?
     @State private var showScrollToBottom = false
+    /// One-shot initial scroll + auto-follow throttle (offset-based follow).
+    @State private var didInitialScroll = false
+    @State private var lastAutoScroll = Date.distantPast
     /// Live-refreshed host-ownership state (banner stays current).
     @State private var liveNow = false
     @State private var livePid: Int?
