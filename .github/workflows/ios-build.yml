@@ -3,14 +3,21 @@ name: Build iOS App
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
-  build-remote-pi:
-    name: Build RemotePi (iOS 15)
+  build-ios:
+    name: Build AiChing (iOS)
     runs-on: macos-15
+
     steps:
       - uses: actions/checkout@v5
+
+      - name: Use default Xcode
+        run: xcode-select -p && xcodebuild -version
+
       - name: Install XcodeGen
         run: |
           curl -sL https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip -o /tmp/xcodegen.zip
@@ -18,21 +25,100 @@ jobs:
           echo "/tmp/xcgen/xcodegen/bin" >> $GITHUB_PATH
           export PATH="/tmp/xcgen/xcodegen/bin:$PATH"
           xcodegen --version
+
       - name: Generate Xcode Project
         run: |
           cd ios
           xcodegen generate --spec project.yml
-      - name: Build RemotePi
+          echo "Generated:"
+          ls -la AiChing.xcodeproj/
+
+      - name: Build iOS App (device)
         run: |
           cd ios
-          xcodebuild -project AiChing.xcodeproj -scheme RemotePi \
-            -destination 'generic/platform=iOS' -configuration Debug clean build \
-            CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO
+          xcodebuild \
+            -project AiChing.xcodeproj \
+            -scheme AiChing \
+            -destination 'generic/platform=iOS' \
+            -configuration Debug \
+            clean build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            PRODUCT_BUNDLE_IDENTIFIER=com.aiching.app
+          echo "BUILD_PATH=" >> $GITHUB_ENV
+          echo "BUILD_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name '*.app' -type d -path '*/Debug-iphoneos/*' | head -1)" >> $GITHUB_ENV
+
+      - name: Package .ipa
+        run: |
+          APP_PATH="${{ env.BUILD_PATH }}"
+          echo "App at: $APP_PATH"
+          ls -la "$APP_PATH/"
+          PAYLOAD_DIR="Payload"
+          mkdir -p "$PAYLOAD_DIR"
+          cp -R "$APP_PATH" "$PAYLOAD_DIR/"
+          zip -r AiChing.ipa "$PAYLOAD_DIR"/
+          ls -la AiChing.ipa
+
+      - name: Upload .ipa
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: AiChing-ipa
+          path: AiChing.ipa
+          retention-days: 7
+
+
+
+  build-remote-pi:
+    name: Build RemotePi (iOS 15)
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install XcodeGen
+        run: |
+          curl -sL https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip -o /tmp/xcodegen.zip
+          cd /tmp && unzip -q xcodegen.zip -d xcgen
+          echo "/tmp/xcgen/xcodegen/bin" >> $GITHUB_PATH
+          export PATH="/tmp/xcgen/xcodegen/bin:$PATH"
+          xcodegen --version
+
+      - name: Generate Xcode Project
+        run: |
+          cd ios
+          xcodegen generate --spec project.yml
+
+      - name: Build RemotePi (device, iOS 15 target)
+        run: |
+          cd ios
+          xcodebuild \
+            -project AiChing.xcodeproj \
+            -scheme RemotePi \
+            -destination 'generic/platform=iOS' \
+            -configuration Debug \
+            clean build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            PRODUCT_BUNDLE_IDENTIFIER=com.aiching.remotepi
+
+      - name: Verify deployment target
+        run: |
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name 'RemotePi.app' -type d -path '*/Debug-iphoneos/*' | head -1)
+          echo "App at: $APP_PATH"
+          plutil -p "$APP_PATH/Info.plist" | grep -i minimum || true
+          echo "MinimumOSVersion: $(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP_PATH/Info.plist")"
+
       - name: Package .ipa
         run: |
           APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name 'RemotePi.app' -type d -path '*/Debug-iphoneos/*' | head -1)
-          mkdir -p Payload && cp -R "$APP_PATH" Payload/
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
           zip -r RemotePi.ipa Payload/
+          ls -la RemotePi.ipa
+
       - name: Upload .ipa
         uses: actions/upload-artifact@v4
         if: success()
@@ -44,22 +130,26 @@ jobs:
   test-remote-pi:
     name: Test RemotePi (unit)
     runs-on: macos-15
+
     steps:
       - uses: actions/checkout@v5
+
       - name: Install XcodeGen
         run: |
           curl -sL https://github.com/yonaskolb/XcodeGen/releases/latest/download/xcodegen.zip -o /tmp/xcodegen.zip
-          cd /tmp && unzip -q xcodegen.zip -d xcgen
-          echo "/tmp/xcgen/xcodegen/bin" >> $GITHUB_PATH
-          export PATH="/tmp/xcgen/xcodegen/bin:$PATH"
-          xcodegen --version
+          cd /tmp && unzip -q xcodegen.zip -d xcodegen
+          echo "/tmp/xcodegen/bin" >> $GITHUB_PATH
+
       - name: Generate Xcode Project
         run: |
           cd ios
           xcodegen generate --spec project.yml
+
       - name: Run unit tests
         run: |
           cd ios
-          xcodebuild test -project AiChing.xcodeproj -scheme RemotePi \
+          xcodebuild test \
+            -project AiChing.xcodeproj \
+            -scheme RemotePi \
             -destination 'platform=iOS Simulator,name=iPhone 16' \
             CODE_SIGNING_ALLOWED=NO
