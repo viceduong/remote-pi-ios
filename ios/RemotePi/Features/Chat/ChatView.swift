@@ -16,6 +16,8 @@ struct ChatView: View {
     @State private var showScrollToBottom = false
     /// True while the user is viewing the bottom (auto-follow stream).
     @State private var isAtBottom = true
+    /// Initial bottom-clamp done (offset-based, animation-free).
+    @State private var didClampInitial = false
     /// Live-refreshed host-ownership state (banner stays current).
     @State private var liveNow = false
     @State private var livePid: Int?
@@ -101,19 +103,24 @@ struct ChatView: View {
                                 }
                                 if message.id == visibleMessages.last?.id {
                                     isAtBottom = true
-                                    showScrollToBottom = false
+                                    withAnimation { showScrollToBottom = false }
                                 }
                             }
                             .onDisappear {
                                 if message.id == visibleMessages.last?.id {
                                     isAtBottom = false
-                                    showScrollToBottom = true
+                                    withAnimation { showScrollToBottom = true }
                                 }
                             }
                         }
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 12)
+                    // Deterministic initial scroll-to-bottom (offset clamp).
+                    .background(ScrollBottomClamp(
+                        trigger: !didClampInitial && !viewModel.messages.isEmpty,
+                        onClamped: { didClampInitial = true }
+                    ))
                 }
                 .overlay(alignment: .bottomTrailing) {
                     if showScrollToBottom {
@@ -132,30 +139,11 @@ struct ChatView: View {
                         .padding(.bottom, 10)
                     }
                 }
-                // Follow the stream while at the bottom — smooth animated jump
-                // (deltas are coalesced, so this fires only on new messages).
+                // Follow the stream only while the user is at the bottom — never
+                // fight their scroll. Non-animated jumps keep it smooth.
                 .onChange(of: viewModel.messages.count) { _ in
                     if isAtBottom {
-                        // Wait for the new rows to lay out before scrolling
-                        // (scrollTo is a no-op against unrendered ids).
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                            if isAtBottom { scrollToBottom(proxy, animated: true) }
-                        }
-                    }
-                }
-                .onChange(of: viewModel.isLoadingHistory) { loading in
-                    // Initial history load: scroll to the bottom once rendered.
-                    if !loading && isAtBottom {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                            if isAtBottom { scrollToBottom(proxy, animated: false) }
-                        }
-                    }
-                }
-                // Pagination: keep position when older messages are prepended.
-                .onChange(of: viewModel.prependAnchor) { _ in
-                    if let anchor = viewModel.prependAnchor {
-                        proxy.scrollTo(anchor, anchor: .top)
-                        viewModel.consumePrependAnchor()
+                        scrollToBottom(proxy, animated: false)
                     }
                 }
             }
@@ -298,7 +286,7 @@ struct ChatView: View {
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
         if let last = visibleMessages.last {
             if animated {
-                withAnimation(.easeInOut(duration: 0.3)) {
+                withAnimation(.easeOut(duration: 0.25)) {
                     proxy.scrollTo(last.id, anchor: .bottom)
                 }
             } else {
@@ -319,6 +307,9 @@ struct MessageBubble: View {
     @State private var noteExpanded = false
     @Environment(\.chatTextScale) private var textScale
     @Environment(\.theme) private var theme
+    /// Parsed markdown (off-main, cached by text) — avoids first-frame stutter
+    /// when opening a session with many markdown-heavy messages.
+    @State private var parsedText: AttributedString?
 
     private func scaled(_ base: CGFloat) -> CGFloat { base * CGFloat(textScale) }
 
@@ -450,9 +441,10 @@ struct MessageBubble: View {
                         .font(.system(size: scaled(17)))
                         .textSelection(.enabled)
                 } else {
-                    Text(rendered(message.text))
+                    Text(displayText)
                         .font(.system(size: scaled(17)))
                         .textSelection(.enabled)
+                        .onAppear { loadParsedText() }
                 }
             } else if isStreaming && message.thinking?.isEmpty != false {
                 StreamingDots()
@@ -530,9 +522,37 @@ struct MessageBubble: View {
         }
     }
 
+    /// Plain text until the off-main markdown parse lands (cached by text).
+    private var displayText: AttributedString {
+        parsedText ?? AttributedString(message.text)
+    }
+
+    private static let markdownCache = NSCache<NSString, NSAttributedString>()
+
+    private func loadParsedText() {
+        if parsedText != nil { return }
+        let text = message.text
+        if let cached = Self.markdownCache.object(forKey: text as NSString) {
+            parsedText = AttributedString(cached)
+            return
+        }
+        Task.detached(priority: .userInitiated) {
+            let parsed = MessageBubble.parseMarkdown(text)
+            let boxed = NSAttributedString(attributedString: parsed)
+            Self.markdownCache.setObject(boxed, forKey: text as NSString)
+            await MainActor.run { self.parsedText = AttributedString(boxed) }
+        }
+    }
+
+    private static func parseMarkdown(_ text: String) -> NSAttributedString {
+        NSAttributedString((try? AttributedString(
+            markdown: text,
+            options: AttributedString.MarkdownParsingOptions(
+                interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        )) ?? AttributedString(text))
+    }
+
     private func rendered(_ text: String) -> AttributedString {
-        // inlineOnlyPreservingWhitespace: Markdown collapses single \n into
-        // spaces by default — pi output relies on them for line breaks.
         (try? AttributedString(markdown: text,
                                options: AttributedString.MarkdownParsingOptions(
                                    interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)

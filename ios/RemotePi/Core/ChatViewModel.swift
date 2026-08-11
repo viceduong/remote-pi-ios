@@ -33,6 +33,9 @@ final class ChatViewModel: ObservableObject {
     /// smooth instead of re-rendering per token.
     private var pendingDelta = ""
     private var flushTask: Task<Void, Never>?
+    /// Batched file_update pushes (avoid render storms right after open).
+    private var pendingFileMessages: [ChatMessage] = []
+    private var fileFlushTask: Task<Void, Never>?
     /// Set when older messages are prepended — the list scrolls back to this
     /// anchor so pagination doesn't visually jump.
     @Published var prependAnchor: String?
@@ -276,7 +279,19 @@ final class ChatViewModel: ObservableObject {
                     isStreaming = true
                     fileActivityAt = Date()
                 }
-                appendTail([ChatMessage.fromAgentMessage(msg)])
+                // Batch bursts (open-time replay + live host writes) into one
+                // append to avoid a render storm on the first frames.
+                pendingFileMessages.append(ChatMessage.fromAgentMessage(msg))
+                if fileFlushTask == nil {
+                    fileFlushTask = Task { [weak self] in
+                        try? await Task.sleep(nanoseconds: 120_000_000)
+                        guard let self, !Task.isCancelled else { return }
+                        self.fileFlushTask = nil
+                        let batch = self.pendingFileMessages
+                        self.pendingFileMessages = []
+                        self.appendTail(batch)
+                    }
+                }
             }
         default:
             break
@@ -287,43 +302,14 @@ final class ChatViewModel: ObservableObject {
     /// an existing message by role + text head + near-identical timestamp
     /// (covers optimistic copies vs server echoes via SSE/file_update/poll).
     private func isDuplicate(_ m: ChatMessage) -> Bool {
-        if let eid = m.entryId, messages.contains(where: { $0.entryId == eid }) { return true }
-        return messages.contains { existing in
-            existing.role == m.role
-                && existing.text.prefix(80) == m.text.prefix(80)
-                && abs((existing.timestamp ?? 0) - (m.timestamp ?? 0)) < 3000
-        }
+        ChatMerger.isDuplicate(m, in: messages)
     }
 
-    /// Append server-sourced messages. Dedupes by entryId; for same-role
-    /// messages that are continuations of the last bubble (partial vs full
-    /// text, or the same entry arriving from SSE and the file) it REPLACES
-    /// the last bubble instead of appending a second copy.
+    /// Append server-sourced messages — merge semantics live in ChatMerger
+    /// (dedupe by entryId, replace-on-continuation) so every path behaves
+    /// identically and the logic is unit-tested.
     private func appendTail(_ tail: [ChatMessage]) {
-        var toAdd: [ChatMessage] = []
-        for m in tail {
-            if isDuplicate(m) { continue }
-            if let lastIdx = messages.indices.last {
-                let last = messages[lastIdx]
-                if last.role == m.role {
-                    let a = last.text
-                    let b = m.text
-                    let sameEntry = last.entryId != nil && last.entryId == m.entryId
-                    let continuation = (a.isEmpty && !b.isEmpty)
-                        || (b.hasPrefix(a) && a.count > 20)
-                        || (a.hasPrefix(b) && b.count > 20)
-                    if sameEntry || continuation {
-                        // Replace with the fuller/complete copy.
-                        messages[lastIdx] = m
-                        continue
-                    }
-                }
-            }
-            toAdd.append(m)
-        }
-        if !toAdd.isEmpty {
-            messages.append(contentsOf: toAdd)
-        }
+        ChatMerger.append(&messages, tail)
         streamingIndex = nil
     }
 

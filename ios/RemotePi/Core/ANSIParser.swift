@@ -167,20 +167,49 @@ enum ANSIParser {
 }
 
 /// Renders ANSI-colored text with terminal styling (dark, monospace).
+/// Parsing happens off-main with an NSCache — opening a session with many
+/// tool blocks doesn't stutter the first frame.
 struct TerminalText: View {
     let text: String
     var color: Color = Color(hex: 0x8FE3A0)
     var fontSize: CGFloat = 12
     var maxLines: Int? = nil
+    @State private var parsed: NSAttributedString?
+
+    private static let cache = NSCache<NSString, NSAttributedString>()
 
     var body: some View {
-        let attributed = ANSIParser.attributed(
-            text,
-            baseFont: UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular),
-            baseColor: UIColor(color)
+        let base = parsed ?? NSAttributedString(
+            string: text,
+            attributes: [
+                .font: UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular),
+                .foregroundColor: UIColor(color),
+            ]
         )
-        Text(AttributedString(attributed))
+        Text(AttributedString(base))
             .ifLet(maxLines) { view, lines in view.lineLimit(lines) }
+            .onAppear { load() }
+    }
+
+    private func load() {
+        if parsed != nil { return }
+        let key = "\(fontSize)|\(text)" as NSString
+        if let cached = Self.cache.object(forKey: key) {
+            parsed = cached
+            return
+        }
+        let t = text
+        let c = color
+        let f = fontSize
+        Task.detached(priority: .userInitiated) {
+            let a = ANSIParser.attributed(
+                t,
+                baseFont: UIFont.monospacedSystemFont(ofSize: f, weight: .regular),
+                baseColor: UIColor(c)
+            )
+            Self.cache.setObject(a, forKey: key)
+            await MainActor.run { self.parsed = a }
+        }
     }
 }
 

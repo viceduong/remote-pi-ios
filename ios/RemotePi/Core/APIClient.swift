@@ -62,20 +62,25 @@ struct APIClient {
 
     func get<T: Decodable>(_ path: String) async throws -> T {
         let data = try await send(makeRequest(path))
-        return try decode(T.self, from: data)
+        return try await decode(T.self, from: data)
     }
 
     func post<T: Decodable>(_ path: String, body: (any Encodable)? = nil) async throws -> T {
         let data = try await send(makeRequest(path, method: "POST", body: body))
-        return try decode(T.self, from: data)
+        return try await decode(T.self, from: data)
     }
 
-    private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+    private func decode<T: Decodable>(_ type: T.Type, from data: Data) async throws -> T {
         guard !data.isEmpty else {
             throw APIError.decoding("empty response (server restarted?)")
         }
         do {
-            return try JSONDecoder().decode(T.self, from: data)
+            // Decode off the main thread — large history/session payloads would
+            // otherwise stutter the first frame when a chat opens.
+            let result: T = try await Task.detached(priority: .userInitiated) {
+                try JSONDecoder().decode(T.self, from: data)
+            }.value
+            return result
         } catch {
             // Surface what actually came back so misconfigured URLs are obvious
             // (e.g. hitting a router page on port 80 because :8787 was omitted).
