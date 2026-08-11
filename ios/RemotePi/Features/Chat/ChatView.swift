@@ -10,6 +10,24 @@ private struct BottomMarkerKey: PreferenceKey {
     }
 }
 
+/// Bottom marker + one-shot offset clamp, extracted into a tiny view so the
+/// chat layout type-checks quickly.
+private struct BottomMarkerAndClamp: View {
+    let clampTrigger: Bool
+    let onClamped: () -> Void
+
+    var body: some View {
+        Color.clear.frame(height: 1)
+            .background(GeometryReader { g in
+                Color.clear.preference(
+                    key: BottomMarkerKey.self,
+                    value: g.frame(in: .named("chatScroll")).maxY
+                )
+            })
+            .background(ScrollBottomClamp(trigger: clampTrigger, onClamped: onClamped))
+    }
+}
+
 /// Chat conversation with streaming responses, tool activity and abort control.
 @MainActor
 struct ChatView: View {
@@ -27,6 +45,10 @@ struct ChatView: View {
     /// One-shot initial scroll + auto-follow throttle (offset-based follow).
     @State private var didInitialScroll = false
     @State private var lastAutoScroll = Date.distantPast
+    /// Measured from the real scroll offset (bottom marker vs viewport).
+    @State private var nearBottom = false
+    /// Initial offset clamp done.
+    @State private var didClampInitial = false
     /// True while the user is actively dragging — the follow must never fight
     /// an in-progress pan (that was the bottom stutter).
     @State private var isUserScrolling = false
@@ -122,20 +144,12 @@ struct ChatView: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 12)
-                    // Reliable open-at-bottom: offset clamp (bounded, no loop).
-                    .background(ScrollBottomClamp(
-                        trigger: !didClampInitial && !viewModel.messages.isEmpty,
+                    // Bottom marker + reliable open-at-bottom clamp (extracted
+                    // so the type checker isn't overwhelmed).
+                    .background(BottomMarkerAndClamp(
+                        clampTrigger: !didClampInitial && !viewModel.messages.isEmpty,
                         onClamped: { didClampInitial = true }
                     ))
-
-                    // Bottom marker: reports its maxY in the scroll space.
-                    Color.clear.frame(height: 1)
-                        .background(GeometryReader { g in
-                            Color.clear.preference(
-                                key: BottomMarkerKey.self,
-                                value: g.frame(in: .named("chatScroll")).maxY
-                            )
-                        })
 
                     // Gesture-aware follow: never jump while the user drags.
                     Color.clear.frame(height: 1)
