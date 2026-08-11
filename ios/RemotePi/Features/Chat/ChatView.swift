@@ -347,6 +347,7 @@ struct MessageBubble: View {
     var onDiagnose: (ChatMessage) -> Void = { _ in }
     var onFork: (ChatMessage) -> Void = { _ in }
     @State private var noteExpanded = false
+    @State private var assistantExpanded = false
     @Environment(\.chatTextScale) private var textScale
     @Environment(\.theme) private var theme
     /// Parsed markdown (off-main, cached by text) — avoids first-frame stutter
@@ -483,10 +484,28 @@ struct MessageBubble: View {
                         .font(.system(size: scaled(17)))
                         .textSelection(.enabled)
                 } else {
-                    Text(displayText)
-                        .font(.system(size: scaled(17)))
-                        .textSelection(.enabled)
-                        .onAppear { loadParsedText() }
+                    // Long messages are COLLAPSED by default: a fully laid-out
+                    // multi-KB markdown row is the per-row cost that stutters
+                    // LazyVStack scrolling in either direction. Expand on tap.
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(displayText)
+                            .font(.system(size: scaled(17)))
+                            .textSelection(.enabled)
+                            .lineLimit(assistantExpanded ? nil : 12)
+                            .onAppear { loadParsedText() }
+                        if !assistantExpanded && message.text.count > 700 {
+                            Button {
+                                withAnimation { assistantExpanded = true }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Text("Show more…")
+                                    Image(systemName: "chevron.down")
+                                }
+                                .font(.caption)
+                                .foregroundColor(theme.secondaryText)
+                            }
+                        }
+                    }
                 }
             } else if isStreaming && message.thinking?.isEmpty != false {
                 StreamingDots()
