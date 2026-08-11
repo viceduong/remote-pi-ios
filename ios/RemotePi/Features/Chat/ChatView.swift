@@ -164,41 +164,45 @@ struct ChatView: View {
                 }
             }
 
-            ComposerView(viewModel: viewModel)
-
-            // Fixed-height reservation: the working/queued bars must never
-            // resize the ScrollView viewport (that causes visible scroll jumps).
+        }
+        // Composer + status bars live in the bottom safe-area inset: iOS 15
+        // keyboard avoidance is clean (no blank band below the input), and the
+        // fixed-height reservation above the input stops viewport jumps.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
-                if let work = viewModel.workingText {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                            .tint(theme.accent)
-                        Text(work)
-                            .font(.caption)
-                            .foregroundColor(theme.secondaryText)
-                        Spacer()
+                VStack(spacing: 0) {
+                    if let work = viewModel.workingText {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(theme.accent)
+                            Text(work)
+                                .font(.caption)
+                                .foregroundColor(theme.secondaryText)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(theme.accent.opacity(0.10))
+                    } else {
+                        Color.clear.frame(height: 28)
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(theme.accent.opacity(0.10))
-                } else {
-                    Color.clear.frame(height: 28)
-                }
 
-                if let note = viewModel.queuedNote {
-                    HStack(spacing: 6) {
-                        Image(systemName: "clock.arrow.circlepath")
-                        Text(note)
-                            .font(.caption2)
-                        Spacer()
+                    if let note = viewModel.queuedNote {
+                        HStack(spacing: 6) {
+                            Image(systemName: "clock.arrow.circlepath")
+                            Text(note)
+                                .font(.caption2)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color.orange.opacity(0.15))
+                    } else {
+                        Color.clear.frame(height: 26)
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Color.orange.opacity(0.15))
-                } else {
-                    Color.clear.frame(height: 26)
                 }
+                ComposerView(viewModel: viewModel)
             }
         }
         .environment(\.chatTextScale, textScale)
