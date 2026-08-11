@@ -1,11 +1,12 @@
 import SwiftUI
 
-/// Height of the last message row — any reflow (async markdown/ANSI swap,
-/// streamed text growth) re-anchors the view when the user is at the bottom.
-private struct LastMessageHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+/// Bottom-of-content marker: its maxY in the scroll coordinate space is the
+/// REAL distance signal for auto-follow. Row onAppear/onDisappear flickered
+/// during LazyVStack churn and caused the 'yanked back to bottom' bug.
+private struct BottomMarkerKey: PreferenceKey {
+    static var defaultValue: CGFloat = .infinity
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
+        value = min(value, nextValue())
     }
 }
 
@@ -23,8 +24,6 @@ struct ChatView: View {
     @State private var scrolledToBottom = false
     @State private var focusItem: ToolFocusItem?
     @State private var showScrollToBottom = false
-    /// True while the user is viewing the bottom (auto-follow stream).
-    @State private var isAtBottom = true
     /// Live-refreshed host-ownership state (banner stays current).
     @State private var liveNow = false
     @State private var livePid: Int?
@@ -72,6 +71,7 @@ struct ChatView: View {
                 .padding(.vertical, 6)
                 .background(theme.accent.opacity(0.15))
             }
+            GeometryReader { geo in
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 12) {
@@ -102,25 +102,11 @@ struct ChatView: View {
                                           onDiagnose: { diagnose($0) },
                                           onFork: { forkFrom($0) })
                             .id(message.id)
-                            .background(GeometryReader { geo in
-                                Color.clear.preference(key: LastMessageHeightKey.self,
-                                                        value: geo.size.height)
-                            })
                             .onAppear {
                                 // Prefetch the previous page before the user
                                 // reaches the very top (smooth pagination).
                                 if index < 8 {
                                     Task { await viewModel.loadMore() }
-                                }
-                                if message.id == visibleMessages.last?.id {
-                                    isAtBottom = true
-                                    withAnimation { showScrollToBottom = false }
-                                }
-                            }
-                            .onDisappear {
-                                if message.id == visibleMessages.last?.id {
-                                    isAtBottom = false
-                                    withAnimation { showScrollToBottom = true }
                                 }
                             }
                         }
@@ -128,7 +114,16 @@ struct ChatView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 12)
 
+                    // Bottom marker: reports its maxY in the scroll space.
+                    Color.clear.frame(height: 1)
+                        .background(GeometryReader { g in
+                            Color.clear.preference(
+                                key: BottomMarkerKey.self,
+                                value: g.frame(in: .named("chatScroll")).maxY
+                            )
+                        })
                 }
+                .coordinateSpace(name: "chatScroll")
                 .overlay(alignment: .bottomTrailing) {
                     if showScrollToBottom {
                         Button {
@@ -146,22 +141,27 @@ struct ChatView: View {
                         .padding(.bottom, 10)
                     }
                 }
-                // Follow the stream only while the user is at the bottom — never
-                // fight their scroll. Non-animated jumps keep it smooth.
-                .onChange(of: viewModel.messages.count) { _ in
-                    if isAtBottom {
-                        scrollToBottom(proxy, animated: false)
+                // At-bottom is measured from the REAL scroll offset (bottom
+                // marker vs viewport height) — immune to LazyVStack row
+                // onAppear/onDisappear flicker, so scrolling up is never yanked
+                // back. Follow: one-shot initial, then throttled 250ms, both
+                // non-animated, only while within 200pt of the bottom.
+                .onPreferenceChange(BottomMarkerKey.self) { markerY in
+                    let distance = markerY - geo.size.height
+                    let nearBottom = distance <= 200
+                    let showBtn = distance > 200
+                    if showBtn != showScrollToBottom { showScrollToBottom = showBtn }
+                    if nearBottom {
+                        if !didInitialScroll {
+                            didInitialScroll = true
+                            scrollToBottom(proxy, animated: false)
+                        } else if Date().timeIntervalSince(lastAutoScroll) > 0.25 {
+                            lastAutoScroll = Date()
+                            scrollToBottom(proxy, animated: false)
+                        }
                     }
                 }
-                // The last message can reflow after the initial render (async
-                // markdown/ANSI swap, streamed text growth). Re-anchor once so
-                // the view settles without stutter — only while at the bottom,
-                // non-animated, so it can never loop.
-                .onPreferenceChange(LastMessageHeightKey.self) { _ in
-                    if isAtBottom {
-                        scrollToBottom(proxy, animated: false)
-                    }
-                }
+            }
             }
 
         }
@@ -171,8 +171,7 @@ struct ChatView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 // Fixed-height reservation keeps the viewport stable when bars
-                // toggle. Slots are SMALL (12pt) so a visible banner leaves only
-                // a tiny sliver above the input, not a blank band.
+                // toggle (original 28/26pt slots).
                 VStack(spacing: 0) {
                     if let work = viewModel.workingText {
                         HStack(spacing: 8) {
