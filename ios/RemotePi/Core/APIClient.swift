@@ -150,6 +150,30 @@ struct APIClient {
         return try await post("/api/sessions/\(id)/turn\(suffix)", body: TurnRequest(message: message))
     }
 
+    struct ModelInfo: Decodable, Identifiable {
+        let id: String
+        let name: String?
+        let provider: String?
+    }
+
+    func listModels(_ id: String) async throws -> [ModelInfo] {
+        struct Wrapper: Decodable {
+            struct Inner: Decodable { let models: [ModelInfo] }
+            let models: Inner
+        }
+        let wrapper: Wrapper = try await get("/api/sessions/\(id)/models")
+        return wrapper.models.models
+    }
+
+    func setModel(_ id: String, modelId: String) async throws {
+        struct Req: Encodable { let modelId: String }
+        try await postNoResponse("/api/sessions/\(id)/models", body: Req(modelId: modelId))
+    }
+
+    func cycleModel(_ id: String) async throws {
+        try await postNoResponse("/api/sessions/\(id)/models/cycle")
+    }
+
     /// Fork the session at a user message (or latest when entryId is nil).
     func forkSession(_ id: String, entryId: String? = nil, name: String? = nil) async throws -> (SessionSummary, String?) {
         struct ForkRequest: Encodable {

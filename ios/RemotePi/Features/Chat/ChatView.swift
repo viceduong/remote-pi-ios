@@ -27,6 +27,9 @@ struct ChatView: View {
     /// One-shot initial scroll + auto-follow throttle (offset-based follow).
     @State private var didInitialScroll = false
     @State private var lastAutoScroll = Date.distantPast
+    /// True while the user is actively dragging — the follow must never fight
+    /// an in-progress pan (that was the bottom stutter).
+    @State private var isUserScrolling = false
     /// Live-refreshed host-ownership state (banner stays current).
     @State private var liveNow = false
     @State private var livePid: Int?
@@ -125,6 +128,12 @@ struct ChatView: View {
                                 value: g.frame(in: .named("chatScroll")).maxY
                             )
                         })
+
+                    // Gesture-aware follow: never jump while the user drags.
+                    Color.clear.frame(height: 1)
+                        .background(ScrollPanDetector { active in
+                            isUserScrolling = active
+                        })
                 }
                 .coordinateSpace(name: "chatScroll")
                 .overlay(alignment: .bottomTrailing) {
@@ -154,7 +163,7 @@ struct ChatView: View {
                     let nearBottom = distance <= 200
                     let showBtn = distance > 200
                     if showBtn != showScrollToBottom { showScrollToBottom = showBtn }
-                    if nearBottom {
+                    if nearBottom && !isUserScrolling {
                         if !didInitialScroll {
                             didInitialScroll = true
                             scrollToBottom(proxy, animated: false)
