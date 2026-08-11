@@ -16,8 +16,6 @@ struct ChatView: View {
     @State private var showScrollToBottom = false
     /// True while the user is viewing the bottom (auto-follow stream).
     @State private var isAtBottom = true
-    /// Initial bottom-clamp done (offset-based, animation-free).
-    @State private var didClampInitial = false
     /// Live-refreshed host-ownership state (banner stays current).
     @State private var liveNow = false
     @State private var livePid: Int?
@@ -116,11 +114,7 @@ struct ChatView: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 12)
-                    // Deterministic initial scroll-to-bottom (offset clamp).
-                    .background(ScrollBottomClamp(
-                        trigger: !didClampInitial && !viewModel.messages.isEmpty,
-                        onClamped: { didClampInitial = true }
-                    ))
+
                 }
                 .overlay(alignment: .bottomTrailing) {
                     if showScrollToBottom {
@@ -150,31 +144,39 @@ struct ChatView: View {
 
             ComposerView(viewModel: viewModel)
 
-            if let work = viewModel.workingText {
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(theme.accent)
-                    Text(work)
-                        .font(.caption)
-                        .foregroundColor(theme.secondaryText)
-                    Spacer()
+            // Fixed-height reservation: the working/queued bars must never
+            // resize the ScrollView viewport (that causes visible scroll jumps).
+            VStack(spacing: 0) {
+                if let work = viewModel.workingText {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(theme.accent)
+                        Text(work)
+                            .font(.caption)
+                            .foregroundColor(theme.secondaryText)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(theme.accent.opacity(0.10))
+                } else {
+                    Color.clear.frame(height: 28)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(theme.accent.opacity(0.10))
-            }
 
-            if let note = viewModel.queuedNote {
-                HStack(spacing: 6) {
-                    Image(systemName: "clock.arrow.circlepath")
-                    Text(note)
-                        .font(.caption2)
-                    Spacer()
+                if let note = viewModel.queuedNote {
+                    HStack(spacing: 6) {
+                        Image(systemName: "clock.arrow.circlepath")
+                        Text(note)
+                            .font(.caption2)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color.orange.opacity(0.15))
+                } else {
+                    Color.clear.frame(height: 26)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Color.orange.opacity(0.15))
             }
         }
         .environment(\.chatTextScale, textScale)
