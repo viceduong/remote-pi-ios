@@ -1,5 +1,14 @@
 import SwiftUI
 
+/// Height of the last message row — any reflow (async markdown/ANSI swap,
+/// streamed text growth) re-anchors the view when the user is at the bottom.
+private struct LastMessageHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 /// Chat conversation with streaming responses, tool activity and abort control.
 @MainActor
 struct ChatView: View {
@@ -93,6 +102,10 @@ struct ChatView: View {
                                           onDiagnose: { diagnose($0) },
                                           onFork: { forkFrom($0) })
                             .id(message.id)
+                            .background(GeometryReader { geo in
+                                Color.clear.preference(key: LastMessageHeightKey.self,
+                                                        value: geo.size.height)
+                            })
                             .onAppear {
                                 // Prefetch the previous page before the user
                                 // reaches the very top (smooth pagination).
@@ -136,6 +149,15 @@ struct ChatView: View {
                 // Follow the stream only while the user is at the bottom — never
                 // fight their scroll. Non-animated jumps keep it smooth.
                 .onChange(of: viewModel.messages.count) { _ in
+                    if isAtBottom {
+                        scrollToBottom(proxy, animated: false)
+                    }
+                }
+                // The last message can reflow after the initial render (async
+                // markdown/ANSI swap, streamed text growth). Re-anchor once so
+                // the view settles without stutter — only while at the bottom,
+                // non-animated, so it can never loop.
+                .onPreferenceChange(LastMessageHeightKey.self) { _ in
                     if isAtBottom {
                         scrollToBottom(proxy, animated: false)
                     }
