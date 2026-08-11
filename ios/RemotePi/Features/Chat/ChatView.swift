@@ -170,36 +170,41 @@ struct ChatView: View {
         // fixed-height reservation above the input stops viewport jumps.
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
-                // Bars flow directly above the composer — no reserved slots, so
-                // no gap ever appears between a visible banner and the input.
-                // (Toggling a bar shifts the viewport once per turn; acceptable.)
-                if let work = viewModel.workingText {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                            .tint(theme.accent)
-                        Text(work)
-                            .font(.caption)
-                            .foregroundColor(theme.secondaryText)
-                        Spacer()
+                // Fixed-height reservation keeps the viewport stable when bars
+                // toggle. Slots are SMALL (12pt) so a visible banner leaves only
+                // a tiny sliver above the input, not a blank band.
+                VStack(spacing: 0) {
+                    if let work = viewModel.workingText {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(theme.accent)
+                            Text(work)
+                                .font(.caption)
+                                .foregroundColor(theme.secondaryText)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(theme.accent.opacity(0.10))
+                    } else {
+                        Color.clear.frame(height: 12)
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(theme.accent.opacity(0.10))
-                }
 
-                if let note = viewModel.queuedNote {
-                    HStack(spacing: 6) {
-                        Image(systemName: "clock.arrow.circlepath")
-                        Text(note)
-                            .font(.caption2)
-                        Spacer()
+                    if let note = viewModel.queuedNote {
+                        HStack(spacing: 6) {
+                            Image(systemName: "clock.arrow.circlepath")
+                            Text(note)
+                                .font(.caption2)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color.orange.opacity(0.15))
+                    } else {
+                        Color.clear.frame(height: 12)
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Color.orange.opacity(0.15))
                 }
-
                 ComposerView(viewModel: viewModel)
             }
         }
