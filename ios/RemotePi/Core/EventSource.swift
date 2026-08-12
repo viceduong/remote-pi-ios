@@ -136,7 +136,8 @@ final class EventSource: NSObject, URLSessionDataDelegate {
             let end = buffer.index(after: lineEnd)
             let lineData = buffer[buffer.startIndex..<lineEnd]
             buffer.removeSubrange(buffer.startIndex..<end)
-            out.append(String(decoding: lineData, as: UTF8.self).replacingOccurrences(of: "", with: ""))
+            out.append(String(decoding: lineData, as: UTF8.self).replacingOccurrences(of: "\r", with: ""))
+", with: ""))
         }
         return out
     }
