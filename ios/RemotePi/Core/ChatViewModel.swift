@@ -35,6 +35,11 @@ final class ChatViewModel: ObservableObject {
     private var fileActivityAt: Date?
     /// True after the first SSE connection (reconnects reconcile history).
     private var hasConnectedOnce = false
+    /// Oldest timestamp actually fetched (pagination baseline, survives eviction).
+    private var lowestFetchedTs: Int?
+    /// Locally-queued sends while offline (persisted, flushed on reconnect).
+    @Published private(set) var offlinePending: [String] = []
+    private var offlineKey: String { "offlineQueue.\(sessionId)" }
     /// Coalesced streamed deltas: batched flushes (~90ms) keep scrolling
     /// smooth instead of re-rendering per token.
     private var pendingDelta = ""
@@ -144,7 +149,10 @@ final class ChatViewModel: ObservableObject {
         } catch {
             isStreaming = false
             workingText = nil
-            if case APIError.http(409, _, "session_live") = error {
+            if case APIError.offline = error {
+                offlinePending.append(trimmed)
+                saveOfflineQueue()
+            } else if case APIError.http(409, _, "session_live") = error {
                 // Host agent owns the session — ask before double-writing.
                 if force {
                     errorMessage = "Host agent is still using this session — the JSONL may interleave."
@@ -180,14 +188,26 @@ final class ChatViewModel: ObservableObject {
             let page = try await client.fetchMessages(sessionId, limit: 100)
             messages = page.messages
             hasMore = page.hasMore
+            lowestFetchedTs = page.messages.compactMap { $0.timestamp }.min()
+            loadOfflineQueue()
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
+    /// Bound memory on very long sessions: drop far-from-viewport pages.
+    /// `lowestFetchedTs` stays correct, so scrolling up refetches the span.
+    private func evictIfNeeded() {
+        let maxRetained = 400
+        let trigger = 600
+        guard messages.count > trigger else { return }
+        messages.removeFirst(messages.count - maxRetained)
+    }
+
     /// Fetch the next older page and prepend it (triggered at scroll top).
     func loadMore() async {
-        guard hasMore, !loadingMore, let earliest = messages.min(by: { ($0.timestamp ?? 0) < ($1.timestamp ?? 0) })?.timestamp else { return }
+        guard hasMore, !loadingMore,
+              let earliest = (messages.compactMap { $0.timestamp }.min()) ?? lowestFetchedTs else { return }
         loadingMore = true
         defer { loadingMore = false }
         do {
@@ -206,6 +226,8 @@ final class ChatViewModel: ObservableObject {
             prependAnchor = messages.first?.id.uuidString
             messages.insert(contentsOf: fresh, at: 0)
             hasMore = page.hasMore
+            lowestFetchedTs = min(lowestFetchedTs ?? Int.max, page.messages.compactMap { $0.timestamp }.min() ?? Int.max)
+            evictIfNeeded()
         } catch {
             // transient — leave hasMore as-is so a later scroll retries
         }
@@ -233,6 +255,9 @@ final class ChatViewModel: ObservableObject {
                     // server truth immediately.
                     if self?.hasConnectedOnce == true {
                         await self?.refreshFromServer()
+                        await self?.flushOfflineQueue()
+                    } else {
+                        await self?.flushOfflineQueue()
                     }
                     self?.hasConnectedOnce = true
                 case .connecting: self?.connectionState = .connecting
@@ -380,6 +405,35 @@ final class ChatViewModel: ObservableObject {
                 queuedNote = "\(queuedItems.count) message\(queuedItems.count > 1 ? "s" : "") queued — agent is busy"
             }
         }
+    }
+
+    /// Persisted offline queue helpers.
+    private func loadOfflineQueue() {
+        if let data = UserDefaults.standard.array(forKey: offlineKey) as? [String] {
+            offlinePending = data
+        }
+    }
+    private func saveOfflineQueue() {
+        UserDefaults.standard.set(offlinePending, forKey: offlineKey)
+    }
+
+    func flushOfflineQueue() async {
+        guard !offlinePending.isEmpty else { return }
+        for message in offlinePending {
+            do {
+                _ = try await client.sendTurn(sessionId, message: message)
+                offlinePending.removeAll { $0 == message }
+            } catch {
+                break // still offline — keep the rest
+            }
+        }
+        saveOfflineQueue()
+        if offlinePending.isEmpty { queuedNote = nil }
+    }
+
+    func discardOffline(_ message: String) {
+        offlinePending.removeAll { $0 == message }
+        saveOfflineQueue()
     }
 
     func cancelQueued(_ itemId: String) async {

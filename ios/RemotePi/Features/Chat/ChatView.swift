@@ -128,6 +128,11 @@ struct ChatView: View {
                                 Task { await viewModel.cancelQueued(item.id) }
                             }
                         }
+                        ForEach(viewModel.offlinePending, id: \.self) { text in
+                            OfflineBubble(text: text) {
+                                withAnimation { viewModel.discardOffline(text) }
+                            }
+                        }
                         ForEach(Array(visibleMessages.enumerated()), id: \.element.id) { index, message in
                             MessageBubble(message: message, isStreaming: isStreaming(message),
                                           hideToolCalls: hideTools,
@@ -760,6 +765,39 @@ struct ComposerView: View {
     }
 }
 
+
+/// A message held locally while offline — sent automatically on reconnect.
+struct OfflineBubble: View {
+    let text: String
+    var onDiscard: () -> Void = {}
+    @Environment(\.chatTextScale) private var textScale
+
+    var body: some View {
+        HStack {
+            Spacer(minLength: 60)
+            VStack(alignment: .trailing, spacing: 4) {
+                HStack(spacing: 5) {
+                    Image(systemName: "wifi.slash")
+                    Text("waiting for connection")
+                        .font(.caption2.weight(.semibold))
+                    Button(action: onDiscard) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .foregroundColor(.secondary)
+                Text(text)
+                    .font(.system(size: 17 * CGFloat(textScale)))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(Color(.secondarySystemBackground))
+                    .foregroundColor(.primary)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+        }
+    }
+}
 
 /// A queued user prompt held server-side (never vanished, never duplicated).
 struct QueuedBubble: View {
