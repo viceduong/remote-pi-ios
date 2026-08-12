@@ -88,7 +88,12 @@ final class ChatViewModel: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 30_000_000_000)
                 guard !Task.isCancelled else { break }
-                await self?.refreshFromServer()
+                guard let self else { return }
+                // Skip the poll while SSE is alive (it just delivered a frame):
+                // the poll is only a safety net for missed file events.
+                if Date().timeIntervalSince(self.lastFrameTime) > 30 {
+                    await self.refreshFromServer()
+                }
             }
         }
     }
