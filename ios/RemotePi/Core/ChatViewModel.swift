@@ -32,6 +32,8 @@ final class ChatViewModel: ObservableObject {
     private var loadingMore = false
     /// Last host-activity push time (for the file-driven working indicator).
     private var fileActivityAt: Date?
+    /// True after the first SSE connection (reconnects reconcile history).
+    private var hasConnectedOnce = false
     /// Coalesced streamed deltas: batched flushes (~90ms) keep scrolling
     /// smooth instead of re-rendering per token.
     private var pendingDelta = ""
@@ -215,7 +217,16 @@ final class ChatViewModel: ObservableObject {
         source.onStateChange = { [weak self] state in
             Task { @MainActor in
                 switch state {
-                case .connected: self?.connectionState = .connected
+                case .connected:
+                    self?.connectionState = .connected
+                    // file_update events are NOT replayed on reconnect (they are
+                    // excluded from the server ring), so a reconnect can miss
+                    // messages written while disconnected. Reconcile from the
+                    // server truth immediately.
+                    if self?.hasConnectedOnce == true {
+                        await self?.refreshFromServer()
+                    }
+                    self?.hasConnectedOnce = true
                 case .connecting: self?.connectionState = .connecting
                 case .disconnected: self?.connectionState = .disconnected
                 }
