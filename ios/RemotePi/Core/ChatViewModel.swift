@@ -20,8 +20,9 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var isStreaming = false
     @Published private(set) var connectionState: ConnectionState = .disconnected
     @Published private(set) var hasMore = false
-    /// Server-owned queued prompts (rendered as pending bubbles — never vanish).
-    @Published private(set) var pendingMessages: [String] = []
+    /// Server-owned queued prompts (durable outbox — rendered as pending
+    /// bubbles with cancel; never vanish, survive navigation/restart).
+    @Published private(set) var queuedItems: [QueueItem] = []
     /// Server-owned queued prompts (rendered as pending bubbles — never vanish).
     @Published private(set) var isLoadingHistory = true
     /// Live "what the assistant is doing" label (Working/Thinking/Running tool…).
@@ -68,6 +69,7 @@ final class ChatViewModel: ObservableObject {
 
     func start() async {
         await loadHistory()
+        await loadQueue()
         openStream()
         startPolling()
     }
@@ -84,7 +86,7 @@ final class ChatViewModel: ObservableObject {
     private func startPolling() {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
                 guard !Task.isCancelled else { break }
                 await self?.refreshFromServer()
             }
@@ -93,7 +95,6 @@ final class ChatViewModel: ObservableObject {
 
     private func refreshFromServer() async {
         guard let page = try? await client.fetchMessages(sessionId, limit: 200) else { return }
-        pendingMessages = page.pending
         // Watchdog: clear the host-driven working indicator if the host agent
         // has been quiet for a while (no turn_end arrives in the file stream).
         if let t = fileActivityAt, Date().timeIntervalSince(t) > 25 {
@@ -130,7 +131,10 @@ final class ChatViewModel: ObservableObject {
             if resp.queued {
                 queuedNote = "⏳ Queued — agent is busy, your message will go in when it finishes"
                 workingText = nil
-                if !pendingMessages.contains(trimmed) { pendingMessages.append(trimmed) }
+                if let id = resp.queueItemId {
+                    queuedItems.append(QueueItem(id: id, message: trimmed, status: "queued",
+                                                 queuedAt: nil, startedAt: nil, completedAt: nil, error: nil))
+                }
             }
         } catch {
             isStreaming = false
@@ -171,7 +175,6 @@ final class ChatViewModel: ObservableObject {
             let page = try await client.fetchMessages(sessionId, limit: 100)
             messages = page.messages
             hasMore = page.hasMore
-            pendingMessages = page.pending
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -284,6 +287,16 @@ final class ChatViewModel: ObservableObject {
         case "agent_exited":
             isStreaming = false
             connectionState = .disconnected
+        case "queue_update":
+            if let items = obj["items"] as? [[String: Any]] {
+                let parsed = items.compactMap { d -> QueueItem? in
+                    guard let id = d["id"] as? String, let message = d["message"] as? String else { return nil }
+                    return QueueItem(id: id, message: message, status: d["status"] as? String ?? "queued",
+                                     queuedAt: nil, startedAt: nil, completedAt: nil, error: nil)
+                }
+                queuedItems = parsed.filter { $0.status != "done" && $0.status != "failed" }
+                if queuedItems.isEmpty { queuedNote = nil }
+            }
         case "agent_crashed":
             // Server auto-respawns; surface it instead of a silent stop.
             isStreaming = false
@@ -336,7 +349,37 @@ final class ChatViewModel: ObservableObject {
     /// identically and the logic is unit-tested.
     private func appendTail(_ tail: [ChatMessage]) {
         ChatMerger.append(&messages, tail)
+        reconcileQueued(tail)
         streamingIndex = nil
+    }
+
+    /// Remove queued chips once their prompt actually streams in as a message.
+    private func reconcileQueued(_ newMessages: [ChatMessage]) {
+        guard !queuedItems.isEmpty else { return }
+        for m in newMessages where m.role == .user {
+            let head = String(m.text.prefix(40))
+            queuedItems.removeAll { item in
+                item.message.prefix(40) == head || item.message == m.text
+            }
+            if queuedItems.isEmpty { queuedNote = nil }
+        }
+    }
+
+    /// Server truth from /queue (durable outbox) — fetch on open so queued
+    /// messages survive navigation.
+    func loadQueue() async {
+        if let items = try? await client.fetchQueue(sessionId) {
+            queuedItems = items.filter { $0.status != "done" && $0.status != "failed" }
+            if !queuedItems.isEmpty {
+                queuedNote = "\(queuedItems.count) message\(queuedItems.count > 1 ? "s" : "") queued — agent is busy"
+            }
+        }
+    }
+
+    func cancelQueued(_ itemId: String) async {
+        queuedItems.removeAll { $0.id == itemId }
+        if queuedItems.isEmpty { queuedNote = nil }
+        try? await client.cancelQueued(sessionId, itemId: itemId)
     }
 
     /// pi marks tool results with a toolName (roles: toolResult/assistant/user).

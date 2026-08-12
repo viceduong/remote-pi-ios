@@ -123,8 +123,10 @@ struct ChatView: View {
                             }
                             .padding(.vertical, 4)
                         }
-                        ForEach(viewModel.pendingMessages, id: \.self) { text in
-                            PendingBubble(text: text)
+                        ForEach(viewModel.queuedItems) { item in
+                            QueuedBubble(item: item) {
+                                Task { await viewModel.cancelQueued(item.id) }
+                            }
                         }
                         ForEach(Array(visibleMessages.enumerated()), id: \.element.id) { index, message in
                             MessageBubble(message: message, isStreaming: isStreaming(message),
@@ -760,8 +762,9 @@ struct ComposerView: View {
 
 
 /// A queued user prompt held server-side (never vanished, never duplicated).
-struct PendingBubble: View {
-    let text: String
+struct QueuedBubble: View {
+    let item: QueueItem
+    var onCancel: () -> Void = {}
     @Environment(\.chatTextScale) private var textScale
 
     var body: some View {
@@ -770,11 +773,16 @@ struct PendingBubble: View {
             VStack(alignment: .trailing, spacing: 4) {
                 HStack(spacing: 5) {
                     Image(systemName: "clock.arrow.circlepath")
-                    Text("queued")
+                    Text(item.status == "running" ? "sending" : "queued")
                         .font(.caption2.weight(.semibold))
+                    Button(action: onCancel) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
                 .foregroundColor(.orange)
-                Text(text)
+                Text(item.message)
                     .font(.system(size: 17 * CGFloat(textScale)))
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)

@@ -29,11 +29,16 @@ final class EventSource: NSObject, URLSessionDataDelegate {
     private let token: String
     private var session: URLSession!
     private var task: URLSessionDataTask?
-    private var buffer = Data()
     private var lastEventId: String?
     private var reconnectAttempts = 0
     private var reconnectTask: Task<Void, Never>?
     private var closed = false
+    /// Parsing lives on this serial background queue (delegateQueue) so heavy
+    /// SSE frames never block the main thread; shared state is lock-guarded.
+    private let parseQueue = DispatchQueue(label: "remote-pi.sse")
+    private let lock = NSLock()
+    private var buffer = Data()
+    private var frame = SSEFrame()
 
     init(url: URL, token: String) {
         self.url = url
@@ -42,29 +47,31 @@ final class EventSource: NSObject, URLSessionDataDelegate {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 60
         config.timeoutIntervalForResource = 60
-        session = URLSession(configuration: config, delegate: self, delegateQueue: .main)
+        session = URLSession(configuration: config, delegate: self, delegateQueue: parseQueue)
     }
 
     func start() {
-        closed = false
+        lock.lock(); closed = false; lock.unlock()
         connect()
     }
 
     func stop() {
-        closed = true
+        lock.lock(); closed = true; lock.unlock()
         reconnectTask?.cancel()
         task?.cancel()
         task = nil
     }
 
     private func connect() {
-        guard !closed else { return }
+        lock.lock(); let shouldConnect = !closed; lock.unlock()
+        guard shouldConnect else { return }
         setState(.connecting)
         var req = URLRequest(url: url)
         req.timeoutInterval = 60
         if !token.isEmpty {
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
+        lock.lock(); let lastEventId = self.lastEventId; lock.unlock()
         if let lastEventId {
             req.setValue(lastEventId, forHTTPHeaderField: "Last-Event-ID")
         }
@@ -73,9 +80,12 @@ final class EventSource: NSObject, URLSessionDataDelegate {
     }
 
     private func scheduleReconnect() {
-        guard !closed else { return }
-        let delay = min(30, pow(2.0, Double(reconnectAttempts))) // 1, 2, 4, ... capped at 30s
+        lock.lock()
+        let shouldReconnect = !closed
+        let delay = min(30, pow(2.0, Double(reconnectAttempts)))
         reconnectAttempts += 1
+        lock.unlock()
+        guard shouldReconnect else { return }
         setState(.connecting)
         reconnectTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -87,7 +97,7 @@ final class EventSource: NSObject, URLSessionDataDelegate {
     // MARK: - URLSessionDataDelegate
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        buffer.append(data)
+        lock.lock(); buffer.append(data); lock.unlock()
         parseBuffer()
     }
 
@@ -115,17 +125,24 @@ final class EventSource: NSObject, URLSessionDataDelegate {
     // MARK: - SSE parsing
 
     private func parseBuffer() {
-        while let lineEnd = buffer.firstIndex(of: 0x0A) { // \n
+        lock.lock(); let lines = drainLines(); lock.unlock()
+        for line in lines { handleLine(line) }
+    }
+
+    /// Extract complete newline-terminated lines from the buffered data.
+    private func drainLines() -> [String] {
+        var out: [String] = []
+        while let lineEnd = buffer.firstIndex(of: 0x0A) {
             let end = buffer.index(after: lineEnd)
             let lineData = buffer[buffer.startIndex..<lineEnd]
             buffer.removeSubrange(buffer.startIndex..<end)
-            let line = String(decoding: lineData, as: UTF8.self)
-                .replacingOccurrences(of: "\r", with: "")
-            handleLine(line)
+            out.append(String(decoding: lineData, as: UTF8.self).replacingOccurrences(of: "
+", with: ""))
         }
+        return out
     }
 
-    private var frame = SSEFrame()
+    
 
     private func handleLine(_ line: String) {
         if line.isEmpty {
