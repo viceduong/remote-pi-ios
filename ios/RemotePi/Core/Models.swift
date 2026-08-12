@@ -152,6 +152,7 @@ struct TurnRequest: Encodable {
 struct TurnResponse: Decodable {
     let accepted: Bool
     let queued: Bool
+    let queueItemId: String?
 }
 
 // MARK: - Chat display model

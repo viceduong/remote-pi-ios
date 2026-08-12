@@ -35,7 +35,11 @@ final class EventSource: NSObject, URLSessionDataDelegate {
     private var closed = false
     /// Parsing lives on this serial background queue (delegateQueue) so heavy
     /// SSE frames never block the main thread; shared state is lock-guarded.
-    private let parseQueue = DispatchQueue(label: "remote-pi.sse")
+    private let parseQueue: OperationQueue = {
+        let q = OperationQueue()
+        q.maxConcurrentOperationCount = 1 // serial, like a dedicated queue
+        return q
+    }()
     private let lock = NSLock()
     private var buffer = Data()
     private var frame = SSEFrame()

@@ -311,7 +311,8 @@ final class ChatViewModel: ObservableObject {
                     isStreaming = false
                     let text = (msg["text"] as? String) ?? ""
                     if !text.isEmpty {
-                        pendingMessages.removeAll { $0 == text }
+                        queuedItems.removeAll { item in item.message == text || item.message.prefix(40) == String(text.prefix(40)) }
+                        if queuedItems.isEmpty { queuedNote = nil }
                     }
                 } else {
                     workingText = role == "tool" ? "Running tool…" : "Writing…"
