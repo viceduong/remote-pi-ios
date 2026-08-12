@@ -49,6 +49,17 @@ struct SessionSummary: Codable, Identifiable, Hashable {
     let workdir: String?
 }
 
+/// Server-owned prompt queue item (durable outbox).
+struct QueueItem: Decodable, Identifiable {
+    let id: String
+    let message: String
+    let status: String
+    let queuedAt: Int?
+    let startedAt: Int?
+    let completedAt: Int?
+    let error: String?
+}
+
 /// GET /api/sessions/:id/messages — wire format (server/src/history.ts shape).
 struct WireMessage: Decodable {
     let id: String?

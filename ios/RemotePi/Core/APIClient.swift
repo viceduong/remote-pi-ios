@@ -177,6 +177,16 @@ struct APIClient {
         try await postNoResponse("/api/sessions/\(id)/models/cycle")
     }
 
+    func fetchQueue(_ id: String) async throws -> [QueueItem] {
+        struct Wrapper: Decodable { let items: [QueueItem] }
+        let wrapper: Wrapper = try await get("/api/sessions/\(id)/queue")
+        return wrapper.items
+    }
+
+    func cancelQueued(_ id: String, itemId: String) async throws {
+        try await delete("/api/sessions/\(id)/queue/\(itemId)")
+    }
+
     /// Fork the session at a user message (or latest when entryId is nil).
     func forkSession(_ id: String, entryId: String? = nil, name: String? = nil) async throws -> (SessionSummary, String?) {
         struct ForkRequest: Encodable {
