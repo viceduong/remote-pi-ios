@@ -37,6 +37,9 @@ final class ChatViewModel: ObservableObject {
     private var hasConnectedOnce = false
     /// Oldest timestamp actually fetched (pagination baseline, survives eviction).
     private var lowestFetchedTs: Int?
+    /// Server-derived working flag (works for mirror sessions too — RPC
+    /// events never reach clients there, so the file state is the signal).
+    @Published private(set) var working = false
     /// Locally-queued sends while offline (persisted, flushed on reconnect).
     @Published private(set) var offlinePending: [String] = []
     private var offlineKey: String { "offlineQueue.\(sessionId)" }
@@ -103,15 +106,31 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    /// Derive the working indicator from the server-derived flag: shows for
+    /// mirror sessions (no RPC events) and bridge sessions alike; never fights
+    /// the live streaming state.
+    private func applyWorkingIndicator() {
+        if working {
+            if workingText == nil && !isStreaming {
+                workingText = "Writing…"
+                fileActivityAt = Date()
+            }
+        } else if !isStreaming {
+            workingText = nil
+        }
+    }
+
     private func refreshFromServer() async {
         guard let page = try? await client.fetchMessages(sessionId, limit: 200) else { return }
-        // Watchdog: clear the host-driven working indicator if the host agent
-        // has been quiet for a while (no turn_end arrives in the file stream).
-        if let t = fileActivityAt, Date().timeIntervalSince(t) > 25 {
+        // Watchdog: clear the indicator if the host agent has been quiet for a
+        // while AND the server no longer reports it as working.
+        if let t = fileActivityAt, Date().timeIntervalSince(t) > 25, !page.working {
             workingText = nil
             isStreaming = false
             fileActivityAt = nil
         }
+        working = page.working
+        applyWorkingIndicator()
         let fresh = page.messages.filter { !isDuplicate($0) }
         guard !fresh.isEmpty else { return }
         // Append only messages newer than everything we already have.
@@ -334,19 +353,17 @@ final class ChatViewModel: ObservableObject {
             fileActivityAt = Date()
         case "file_update":
             // Host/other-client activity pushed by the server's file watcher.
+            working = (obj["working"] as? Bool) ?? working
+            applyWorkingIndicator()
             if let msg = obj["message"] as? [String: Any] {
                 let role = msg["role"] as? String ?? ""
                 if role == "user" {
-                    workingText = nil
-                    isStreaming = false
                     let text = (msg["text"] as? String) ?? ""
                     if !text.isEmpty {
                         queuedItems.removeAll { item in item.message == text || item.message.prefix(40) == String(text.prefix(40)) }
                         if queuedItems.isEmpty { queuedNote = nil }
                     }
                 } else {
-                    workingText = role == "tool" ? "Running tool…" : "Writing…"
-                    isStreaming = true
                     fileActivityAt = Date()
                 }
                 // Batch bursts (open-time replay + live host writes) into one
