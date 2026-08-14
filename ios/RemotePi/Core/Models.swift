@@ -193,8 +193,8 @@ struct ChatMessage: Identifiable, Equatable {
         self.entryId = entryId
         self.clientMessageId = clientMessageId
         self.role = role
-        self.text = text
-        self.thinking = thinking
+        self.text = Self.collapseBlankLines(text)
+        self.thinking = thinking.map { Self.collapseBlankLines($0) }
         self.toolCalls = toolCalls
         self.toolActivity = toolActivity
         self.isError = isError
@@ -203,6 +203,28 @@ struct ChatMessage: Identifiable, Equatable {
         self.model = model
         self.errorMessage = errorMessage
         self.timestamp = timestamp
+    }
+
+    /// Collapse 3+ consecutive newlines to 2 and trim leading/trailing blank lines.
+    /// Prevents session files or markdown from rendering as large blank gaps.
+    static func collapseBlankLines(_ s: String) -> String {
+        var t = s.replacingOccurrences(of: "\r\n", with: "\n")
+        // Trim leading/trailing blank lines / whitespace-only lines
+        t = t.replacingOccurrences(of: "^[\\s\n]*", with: "", options: .regularExpression)
+        t = t.replacingOccurrences(of: "[\\s\n]*$", with: "", options: .regularExpression)
+        // Collapse 3+ newlines → 2 (single blank line). Keep intentional paragraph break.
+        while t.contains("\n\n\n") {
+            t = t.replacingOccurrences(of: "\n\n\n", with: "\n\n")
+        }
+        // Trim trailing spaces on each line (prevents invisible blank lines)
+        t = t.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.replacingOccurrences(of: "[\\s]+$", with: "", options: .regularExpression) }
+            .joined(separator: "\n")
+        return t
+    }
+
+    var isBlankForDisplay: Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && thinking?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false && toolCalls.isEmpty
     }
 
     static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {

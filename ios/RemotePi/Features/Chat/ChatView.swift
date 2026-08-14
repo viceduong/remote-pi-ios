@@ -61,10 +61,12 @@ struct ChatView: View {
     @AppStorage("hideToolsEnabled") private var hideTools = true
 
     /// Focus-mode list: tool messages, tool-call chips, system notes and
-    /// thinking blocks hidden.
+    /// thinking blocks hidden. Blank assistant/user bubbles (whitespace-only)
+    /// are always hidden — they render as empty gaps.
     private var visibleMessages: [ChatMessage] {
+        let base: [ChatMessage]
         if hideTools {
-            return viewModel.messages
+            base = viewModel.messages
                 .filter { $0.role != .tool && !$0.isSystemNote }
                 .map { msg in
                     guard msg.thinking != nil else { return msg }
@@ -72,8 +74,13 @@ struct ChatView: View {
                     m.thinking = nil
                     return m
                 }
+        } else {
+            base = viewModel.messages
         }
-        return viewModel.messages
+        return base.filter { msg in
+            if msg.role == .tool { return true } // tool header still useful even if text collapsed
+            return !msg.isBlankForDisplay
+        }
     }
 
     init(server: ServerConfig, session: SessionSummary) {
