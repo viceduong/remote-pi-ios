@@ -45,7 +45,10 @@ enum ChatMerger {
             }
             if let lastIdx = existing.indices.last {
                 let last = existing[lastIdx]
-                if last.role == m.role {
+                // Continuation only for entry-less streaming fragments; distinct
+                // server entries with different ids are separate messages even
+                // when text shares a prefix and timestamps are close.
+                if last.role == m.role && last.entryId == nil && m.entryId == nil {
                     let a = last.text
                     let b = m.text
                     if let ats = last.timestamp, let bts = m.timestamp {
