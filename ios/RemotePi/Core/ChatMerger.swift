@@ -9,10 +9,12 @@ enum ChatMerger {
     /// near-identical timestamp (covers optimistic copies vs server echoes).
     static func isDuplicate(_ m: ChatMessage, in existing: [ChatMessage]) -> Bool {
         if let eid = m.entryId, existing.contains(where: { $0.entryId == eid }) { return true }
+        guard let mts = m.timestamp else { return false }
         return existing.contains { other in
-            other.role == m.role
+            guard let ots = other.timestamp else { return false }
+            return other.role == m.role
                 && other.text.prefix(80) == m.text.prefix(80)
-                && abs((other.timestamp ?? 0) - (m.timestamp ?? 0)) < 3000
+                && abs(ots - mts) < 3000
         }
     }
 
@@ -25,21 +27,22 @@ enum ChatMerger {
     static func append(_ existing: inout [ChatMessage], _ tail: [ChatMessage]) {
         var toAdd: [ChatMessage] = []
         for m in tail {
+            if let eid = m.entryId,
+               let existingIdx = existing.firstIndex(where: { $0.entryId == eid }) {
+                existing[existingIdx] = m
+                continue
+            }
             if let lastIdx = existing.indices.last {
                 let last = existing[lastIdx]
                 if last.role == m.role {
                     let a = last.text
                     let b = m.text
-                    let sameEntry = last.entryId != nil && last.entryId == m.entryId
-                    if sameEntry {
-                        if a != b { existing[lastIdx] = m }
-                        continue
-                    }
-                    let tsClose = abs((last.timestamp ?? 0) - (m.timestamp ?? 0)) < 3000
-                    let continuation = tsClose && b.count > a.count && b.hasPrefix(a) && a.count >= 10
-                    if continuation {
-                        existing[lastIdx] = m
-                        continue
+                    if let ats = last.timestamp, let bts = m.timestamp {
+                        let continuation = abs(ats - bts) < 3000 && b.count > a.count && b.hasPrefix(a) && a.count >= 10
+                        if continuation {
+                            existing[lastIdx] = m
+                            continue
+                        }
                     }
                 }
             }

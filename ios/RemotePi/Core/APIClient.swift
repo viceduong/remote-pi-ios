@@ -47,12 +47,17 @@ struct APIClient {
         do {
             (data, response) = try await URLSession.shared.data(for: req)
         } catch {
+            if (error as NSError).code == NSURLErrorCancelled {
+                throw CancellationError()
+            }
             throw APIError.offline
         }
         guard let http = response as? HTTPURLResponse else { throw APIError.offline }
         guard (200...299).contains(http.statusCode) else {
             let body = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let nestedMessage = (body?["error"] as? [String: Any])?["message"] as? String
             let message = body?["error"] as? String
+                ?? nestedMessage
                 ?? HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
             let apiCode = body?["code"] as? String
             throw APIError.http(http.statusCode, message, apiCode)

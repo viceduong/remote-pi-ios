@@ -189,8 +189,10 @@ struct ChatMessage: Identifiable, Equatable {
         // Server-mapped shape (history/file_update): flat text/toolCalls fields.
         if let text = json["text"] as? String {
             let rawRole = json["role"] as? String ?? "assistant"
-            let role = MessageRole(rawValue: rawRole) ?? .assistant
             let toolName = json["toolName"] as? String
+            let role: MessageRole = (rawRole == "tool" || rawRole == "toolResult" || toolName != nil)
+                ? .tool
+                : (MessageRole(rawValue: rawRole) ?? .assistant)
             let wireCalls = (json["toolCalls"] as? [[String: Any]]) ?? []
             return ChatMessage(
                 entryId: json["id"] as? String,
@@ -249,7 +251,8 @@ struct ChatMessage: Identifiable, Equatable {
         // role "custom" with customType — system notes, never user bubbles.
         let rawRole = json["role"] as? String
         let isCustom = rawRole == "custom" || (json["customType"] as? String)?.isEmpty == false
-        let isToolResult = toolName?.isEmpty == false || toolOnlyContent
+        let hasToolResultBlock = (json["content"] as? [[String: Any]])?.contains { ($0["type"] as? String) == "toolResult" } == true
+        let isToolResult = toolName?.isEmpty == false || rawRole == "tool" || rawRole == "toolResult" || hasToolResultBlock
         let role: MessageRole
         if isToolResult || rawRole == "tool" || rawRole == "toolResult" {
             role = .tool
@@ -300,6 +303,16 @@ struct ChatMessage: Identifiable, Equatable {
         }
         if let s = raw as? String { return s }
         return String(describing: raw)
+    }
+}
+
+struct OfflineMessage: Identifiable, Codable, Equatable {
+    let id: UUID
+    let text: String
+
+    init(text: String, id: UUID = UUID()) {
+        self.id = id
+        self.text = text
     }
 }
 

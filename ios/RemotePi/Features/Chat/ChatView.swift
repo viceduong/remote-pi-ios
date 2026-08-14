@@ -128,9 +128,9 @@ struct ChatView: View {
                                 Task { await viewModel.cancelQueued(item.id) }
                             }
                         }
-                        ForEach(viewModel.offlinePending, id: \.self) { text in
-                            OfflineBubble(text: text) {
-                                withAnimation { viewModel.discardOffline(text) }
+                        ForEach(viewModel.offlinePending) { item in
+                            OfflineBubble(text: item.text) {
+                                withAnimation { viewModel.discardOffline(item.id) }
                             }
                         }
                         ForEach(Array(visibleMessages.enumerated()), id: \.element.id) { index, message in
@@ -309,12 +309,6 @@ struct ChatView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(viewModel.errorMessage ?? "")
-        }
-        .alert("Session is live on host", isPresented: $viewModel.confirmLiveResume) {
-            Button("Resume anyway", role: .destructive) { viewModel.confirmResumeLive() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("An external pi process is using this session right now. Resuming writes the same session file from two agents — let it finish first if possible.")
         }
         .fullScreenCover(item: $focusItem) { item in
             ToolFocusView(item: item)

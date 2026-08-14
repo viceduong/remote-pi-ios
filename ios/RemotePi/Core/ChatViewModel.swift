@@ -41,11 +41,12 @@ final class ChatViewModel: ObservableObject {
     /// events never reach clients there, so the file state is the signal).
     @Published private(set) var working = false
     /// Locally-queued sends while offline (persisted, flushed on reconnect).
-    @Published private(set) var offlinePending: [String] = []
+    @Published private(set) var offlinePending: [OfflineMessage] = []
     private var offlineKey: String { "offlineQueue.\(sessionId)" }
     /// Coalesced streamed deltas: batched flushes (~90ms) keep scrolling
     /// smooth instead of re-rendering per token.
     private var pendingDelta = ""
+    private var pendingDeltaIndex: Int?
     private var flushTask: Task<Void, Never>?
     /// Batched file_update pushes (avoid render storms right after open).
     private var pendingFileMessages: [ChatMessage] = []
@@ -53,16 +54,12 @@ final class ChatViewModel: ObservableObject {
     /// Set when older messages are prepended — the list scrolls back to this
     /// anchor so pagination doesn't visually jump.
     @Published var prependAnchor: String?
-    /// Set when the host pi agent owns the session — needs user confirmation
-    /// before we resume it from the app (would double-write the session file).
-    @Published var confirmLiveResume = false
-    private var pendingForceText: String?
 
     private let client: APIClient
     private let sessionId: String
     private var eventSource: EventSource?
-    private var lastEventId: String?
     private var pollTask: Task<Void, Never>?
+    private var lifecycleActive = false
 
     /// Index of the assistant bubble currently receiving deltas.
     private var streamingIndex: Int?
@@ -76,16 +73,25 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Lifecycle
 
     func start() async {
+        lifecycleActive = true
         await loadHistory()
+        guard lifecycleActive else { return }
         await loadQueue()
+        guard lifecycleActive else { return }
         openStream()
         startPolling()
     }
 
     func stop() {
+        lifecycleActive = false
         eventSource?.stop()
+        eventSource = nil
         pollTask?.cancel()
         pollTask = nil
+        flushTask?.cancel()
+        flushTask = nil
+        fileFlushTask?.cancel()
+        fileFlushTask = nil
     }
 
     /// Host-terminal / other-client activity reaches the app via the server's
@@ -96,7 +102,7 @@ final class ChatViewModel: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 30_000_000_000)
                 guard !Task.isCancelled else { break }
-                guard let self else { return }
+                guard let self, self.lifecycleActive else { return }
                 // Skip the poll while SSE is alive (it just delivered a frame):
                 // the poll is only a safety net for missed file events.
                 if Date().timeIntervalSince(self.lastFrameTime) > 30 {
@@ -121,7 +127,9 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func refreshFromServer() async {
+        guard lifecycleActive else { return }
         guard let page = try? await client.fetchMessages(sessionId, limit: 200) else { return }
+        guard lifecycleActive else { return }
         // Watchdog: clear the indicator if the host agent has been quiet for a
         // while AND the server no longer reports it as working.
         if let t = fileActivityAt, Date().timeIntervalSince(t) > 25, !page.working {
@@ -131,14 +139,15 @@ final class ChatViewModel: ObservableObject {
         }
         working = page.working
         applyWorkingIndicator()
-        let fresh = page.messages.filter { !isDuplicate($0) }
-        guard !fresh.isEmpty else { return }
-        // Append only messages newer than everything we already have.
+        // Include same-entry updates so fuller server copies replace partial
+        // streamed bubbles; filtering duplicates first discarded replacements.
         let newestLocal = messages.compactMap { $0.timestamp }.max() ?? 0
-        let newer = fresh.filter { ($0.timestamp ?? 0) >= newestLocal }
-        if !newer.isEmpty {
-            appendTail(newer)
+        let knownIds = Set(messages.compactMap { $0.entryId })
+        let fresh = page.messages.filter { message in
+            if let id = message.entryId, knownIds.contains(id) { return true }
+            return (message.timestamp ?? 0) >= newestLocal && !isDuplicate(message)
         }
+        if !fresh.isEmpty { appendTail(fresh) }
     }
 
     // MARK: - Actions
@@ -147,7 +156,7 @@ final class ChatViewModel: ObservableObject {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         pendingText = ""
-        appendUserMessage(trimmed)
+        let optimisticId = appendUserMessage(trimmed)
         // Immediate feedback: the response can take a second to start, and the
         // first SSE event may lag — show a waiting state right away.
         if !isStreaming {
@@ -158,6 +167,7 @@ final class ChatViewModel: ObservableObject {
         do {
             let resp = try await client.sendTurn(sessionId, message: trimmed, force: force)
             if resp.queued {
+                isStreaming = false
                 queuedNote = "⏳ Queued — agent is busy, your message will go in when it finishes"
                 workingText = nil
                 if let id = resp.queueItemId {
@@ -166,31 +176,25 @@ final class ChatViewModel: ObservableObject {
                 }
             }
         } catch {
+            if error is CancellationError {
+                messages.removeAll { $0.id == optimisticId }
+                isStreaming = false
+                workingText = nil
+                return
+            }
             isStreaming = false
             workingText = nil
+            messages.removeAll { $0.id == optimisticId }
             if case APIError.offline = error {
-                offlinePending.append(trimmed)
+                offlinePending.append(OfflineMessage(text: trimmed))
                 saveOfflineQueue()
             } else if case APIError.http(409, _, "session_live") = error {
-                // Host agent owns the session — ask before double-writing.
-                if force {
-                    errorMessage = "Host agent is still using this session — the JSONL may interleave."
-                } else {
-                    pendingForceText = trimmed
-                    confirmLiveResume = true
-                }
+                // Single-writer invariant: stop the host Pi process first.
+                errorMessage = "Host Pi owns this session — stop it in the terminal before sending here."
             } else {
                 errorMessage = error.localizedDescription
             }
         }
-    }
-
-    /// User confirmed: resume the host-owned session anyway (?force=1).
-    func confirmResumeLive() {
-        confirmLiveResume = false
-        guard let text = pendingForceText else { return }
-        pendingForceText = nil
-        Task { await send(text, force: true) }
     }
 
     func abort() async {
@@ -201,11 +205,15 @@ final class ChatViewModel: ObservableObject {
     // MARK: - History (lazy, last-N pages)
 
     private func loadHistory() async {
+        guard lifecycleActive else { return }
         isLoadingHistory = true
         defer { isLoadingHistory = false }
         do {
             let page = try await client.fetchMessages(sessionId, limit: 100)
+            guard lifecycleActive else { return }
             messages = page.messages
+            working = page.working
+            applyWorkingIndicator()
             hasMore = page.hasMore
             lowestFetchedTs = page.messages.compactMap { $0.timestamp }.min()
             loadOfflineQueue()
@@ -225,12 +233,13 @@ final class ChatViewModel: ObservableObject {
 
     /// Fetch the next older page and prepend it (triggered at scroll top).
     func loadMore() async {
-        guard hasMore, !loadingMore,
+        guard lifecycleActive, hasMore, !loadingMore,
               let earliest = (messages.compactMap { $0.timestamp }.min()) ?? lowestFetchedTs else { return }
         loadingMore = true
         defer { loadingMore = false }
         do {
             let page = try await client.fetchMessages(sessionId, limit: 100, before: earliest)
+            guard lifecycleActive else { return }
             guard !page.messages.isEmpty else {
                 hasMore = false
                 return
@@ -294,12 +303,11 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func handle(frame: SSEFrame) {
+        lastFrameTime = Date()
         guard let data = frame.data.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return
         }
-        if let id = frame.id { lastEventId = id }
-
         switch frame.event {
         case "agent_start", "turn_start":
             isStreaming = true
@@ -330,9 +338,8 @@ final class ChatViewModel: ObservableObject {
             if let msg = obj["message"] as? [String: Any] {
                 if (msg["role"] as? String) == "user" { break }
                 if Self.isToolMessage(msg) { upsertTool(from: msg, finalize: true) }
-                else { upsertAssistant(from: msg, finalize: true) }
+                else { upsertAssistant(from: msg, finalize: true); isStreaming = false }
             }
-            isStreaming = false
         case "agent_exited":
             isStreaming = false
             connectionState = .disconnected
@@ -398,7 +405,6 @@ final class ChatViewModel: ObservableObject {
     private func appendTail(_ tail: [ChatMessage]) {
         ChatMerger.append(&messages, tail)
         reconcileQueued(tail)
-        streamingIndex = nil
     }
 
     /// Remove queued chips once their prompt actually streams in as a message.
@@ -426,20 +432,29 @@ final class ChatViewModel: ObservableObject {
 
     /// Persisted offline queue helpers.
     private func loadOfflineQueue() {
-        if let data = UserDefaults.standard.array(forKey: offlineKey) as? [String] {
-            offlinePending = data
+        if let data = UserDefaults.standard.data(forKey: offlineKey),
+           let decoded = try? JSONDecoder().decode([OfflineMessage].self, from: data) {
+            offlinePending = decoded
+            return
+        }
+        // Migrate the original text-only queue without losing messages.
+        if let legacy = UserDefaults.standard.array(forKey: offlineKey) as? [String] {
+            offlinePending = legacy.map { OfflineMessage(text: $0) }
+            saveOfflineQueue()
         }
     }
+
     private func saveOfflineQueue() {
-        UserDefaults.standard.set(offlinePending, forKey: offlineKey)
+        if let data = try? JSONEncoder().encode(offlinePending) {
+            UserDefaults.standard.set(data, forKey: offlineKey)
+        }
     }
 
     func flushOfflineQueue() async {
-        guard !offlinePending.isEmpty else { return }
-        for message in offlinePending {
+        while let item = offlinePending.first {
             do {
-                _ = try await client.sendTurn(sessionId, message: message)
-                offlinePending.removeAll { $0 == message }
+                _ = try await client.sendTurn(sessionId, message: item.text)
+                offlinePending.removeFirst()
             } catch {
                 break // still offline — keep the rest
             }
@@ -448,8 +463,8 @@ final class ChatViewModel: ObservableObject {
         if offlinePending.isEmpty { queuedNote = nil }
     }
 
-    func discardOffline(_ message: String) {
-        offlinePending.removeAll { $0 == message }
+    func discardOffline(_ id: UUID) {
+        offlinePending.removeAll { $0.id == id }
         saveOfflineQueue()
     }
 
@@ -514,6 +529,8 @@ final class ChatViewModel: ObservableObject {
 
     /// Batch streamed text deltas: append to a buffer, flush ~90ms later.
     private func accumulateDelta(_ delta: String, into idx: Int) {
+        if let pendingDeltaIndex, pendingDeltaIndex != idx { flushPendingDelta() }
+        pendingDeltaIndex = idx
         pendingDelta += delta
         guard flushTask == nil else { return }
         flushTask = Task { [weak self] in
@@ -528,7 +545,11 @@ final class ChatViewModel: ObservableObject {
         guard !pendingDelta.isEmpty else { return }
         let delta = pendingDelta
         pendingDelta = ""
-        if let idx = streamingIndex, messages.indices.contains(idx) {
+        let target = pendingDeltaIndex
+        pendingDeltaIndex = nil
+        if let idx = target, messages.indices.contains(idx) {
+            messages[idx].text += delta
+        } else if let idx = streamingIndex, messages.indices.contains(idx) {
             messages[idx].text += delta
         } else if let idx = messages.lastIndex(where: { $0.role == .tool }) {
             messages[idx].text += delta
@@ -581,12 +602,15 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    private func appendUserMessage(_ text: String) {
-        messages.append(ChatMessage(entryId: nil, role: .user, text: text, thinking: nil,
-                                    toolCalls: [], toolActivity: nil,
-                                    isError: false, toolName: nil, isSystemNote: false,
-                                    model: nil, errorMessage: nil,
-                                    timestamp: Int(Date().timeIntervalSince1970 * 1000)))
+    @discardableResult
+    private func appendUserMessage(_ text: String) -> UUID {
+        let message = ChatMessage(entryId: nil, role: .user, text: text, thinking: nil,
+                                  toolCalls: [], toolActivity: nil,
+                                  isError: false, toolName: nil, isSystemNote: false,
+                                  model: nil, errorMessage: nil,
+                                  timestamp: Int(Date().timeIntervalSince1970 * 1000))
+        messages.append(message)
         streamingIndex = nil
+        return message.id
     }
 }

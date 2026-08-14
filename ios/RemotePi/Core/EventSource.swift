@@ -50,7 +50,8 @@ final class EventSource: NSObject, URLSessionDataDelegate {
         super.init()
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 60
-        config.timeoutIntervalForResource = 60
+        // SSE is long-lived; keepalive frames prevent request-idle timeout.
+        config.timeoutIntervalForResource = 24 * 60 * 60
         session = URLSession(configuration: config, delegate: self, delegateQueue: parseQueue)
     }
 
@@ -67,7 +68,12 @@ final class EventSource: NSObject, URLSessionDataDelegate {
     }
 
     private func connect() {
-        lock.lock(); let shouldConnect = !closed; lock.unlock()
+        lock.lock()
+        let shouldConnect = !closed
+        // A partial frame belongs to the old HTTP response, never the new one.
+        buffer.removeAll(keepingCapacity: true)
+        frame = SSEFrame()
+        lock.unlock()
         guard shouldConnect else { return }
         setState(.connecting)
         var req = URLRequest(url: url)
@@ -106,22 +112,28 @@ final class EventSource: NSObject, URLSessionDataDelegate {
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        guard !closed else { return }
-        if let error {
-            // Connection dropped — reconnect with Last-Event-ID.
-            reconnectAttempts = 0
-            scheduleReconnect()
-        } else {
-            setState(.disconnected)
-        }
+        lock.lock(); let isClosed = closed; lock.unlock()
+        guard !isClosed else { return }
+        // EOF is not a successful end for an SSE subscription. Flush any
+        // complete data frame, then reconnect with the last parsed event ID.
+        finishPendingFrame()
+        scheduleReconnect()
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
                     didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        if let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) {
-            setState(.connected)
-            reconnectAttempts = 0
+        if let http = response as? HTTPURLResponse {
+            if (200...299).contains(http.statusCode) {
+                setState(.connected)
+                lock.lock(); reconnectAttempts = 0; lock.unlock()
+            } else {
+                setState(.disconnected)
+                // Do not parse an HTML/JSON error body as SSE frames.
+                completionHandler(.cancel)
+                dataTask.cancel()
+                return
+            }
         }
         completionHandler(.allow)
     }
@@ -147,12 +159,37 @@ final class EventSource: NSObject, URLSessionDataDelegate {
 
     
 
+    private func finishPendingFrame() {
+        lock.lock()
+        let remainder = buffer
+        buffer.removeAll(keepingCapacity: true)
+        lock.unlock()
+        if !remainder.isEmpty {
+            for line in remainder.split(separator: "\n", omittingEmptySubsequences: false) {
+                handleLine(String(line).replacingOccurrences(of: "\r", with: ""))
+            }
+        }
+        lock.lock()
+        let completed = frame
+        frame = SSEFrame()
+        lock.unlock()
+        if !completed.data.isEmpty {
+            if let id = completed.id {
+                lock.lock(); lastEventId = id; lock.unlock()
+            }
+            onFrame?(completed)
+        }
+    }
+
     private func handleLine(_ line: String) {
         if line.isEmpty {
             // Frame terminator — dispatch and reset.
             let completed = frame
             frame = SSEFrame()
             if !completed.data.isEmpty {
+                if let id = completed.id {
+                    lock.lock(); lastEventId = id; lock.unlock()
+                }
                 onFrame?(completed)
             }
             return
