@@ -539,12 +539,12 @@ struct MessageBubble: View {
                     // O(n²) and causes scroll lag on long messages.
                     Text(message.text)
                         .font(.system(size: scaled(17)))
-                        .lineSpacing(3)
+                        .lineSpacing(2)
                         .textSelection(.enabled)
                 } else {
                     Text(displayText)
                         .font(.system(size: scaled(17)))
-                        .lineSpacing(3)
+                        .lineSpacing(2)
                         .textSelection(.enabled)
                         .onAppear { loadParsedText() }
                         .onChange(of: message.text) { _ in
@@ -667,7 +667,7 @@ struct MessageBubble: View {
         let full = NSRange(location: 0, length: ns.length)
         ns.enumerateAttribute(.paragraphStyle, in: full) { value, range, _ in
             let style = (value as? NSMutableParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
-            style.paragraphSpacing = 6
+            style.paragraphSpacing = 4
             style.paragraphSpacingBefore = 0
             style.lineSpacing = 2
             ns.addAttribute(.paragraphStyle, value: style, range: range)
@@ -675,7 +675,7 @@ struct MessageBubble: View {
         // Ensure base paragraph style for plain text without markdown blocks
         if ns.length > 0 && ns.attribute(.paragraphStyle, at: 0, effectiveRange: nil) == nil {
             let style = NSMutableParagraphStyle()
-            style.paragraphSpacing = 6
+            style.paragraphSpacing = 4
             style.paragraphSpacingBefore = 0
             style.lineSpacing = 2
             ns.addAttribute(.paragraphStyle, value: style, range: full)
