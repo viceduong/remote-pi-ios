@@ -205,22 +205,33 @@ struct ChatMessage: Identifiable, Equatable {
         self.timestamp = timestamp
     }
 
-    /// Collapse 3+ consecutive newlines to 2 and trim leading/trailing blank lines.
-    /// Prevents session files or markdown from rendering as large blank gaps.
+    /// Retain at most one consecutive blank line, trim leading/trailing
+    /// blank lines and trailing whitespace. Handles whitespace-only lines
+    /// (" \\n \\n") as blank so duplicate blanks collapse.
     static func collapseBlankLines(_ s: String) -> String {
         var t = s.replacingOccurrences(of: "\r\n", with: "\n")
-        // Trim leading/trailing blank lines / whitespace-only lines
-        t = t.replacingOccurrences(of: "^[\\s\n]*", with: "", options: .regularExpression)
-        t = t.replacingOccurrences(of: "[\\s\n]*$", with: "", options: .regularExpression)
-        // Collapse 3+ newlines → 2 (single blank line). Keep intentional paragraph break.
-        while t.contains("\n\n\n") {
-            t = t.replacingOccurrences(of: "\n\n\n", with: "\n\n")
+        t = t.replacingOccurrences(of: "\r", with: "\n")
+        // Split preserves empty entries so blank lines are visible
+        let rawLines = t.components(separatedBy: "\n")
+        var out: [String] = []
+        out.reserveCapacity(rawLines.count)
+        var consecutiveBlanks = 0
+        for line in rawLines {
+            // Trim trailing whitespace; leading stays for code blocks, but
+            // whitespace-only lines become ""
+            let trimmedTrail = line.replacingOccurrences(of: "[\\t ]+$", with: "", options: .regularExpression)
+            let isBlank = trimmedTrail.trimmingCharacters(in: .whitespaces).isEmpty
+            if isBlank {
+                consecutiveBlanks += 1
+                if consecutiveBlanks <= 1 { out.append("") }
+            } else {
+                consecutiveBlanks = 0
+                out.append(trimmedTrail)
+            }
         }
-        // Trim trailing spaces on each line (prevents invisible blank lines)
-        t = t.split(separator: "\n", omittingEmptySubsequences: false)
-            .map { $0.replacingOccurrences(of: "[\\s]+$", with: "", options: .regularExpression) }
-            .joined(separator: "\n")
-        return t
+        while out.first == "" { out.removeFirst() }
+        while out.last == "" { out.removeLast() }
+        return out.joined(separator: "\n")
     }
 
     var isBlankForDisplay: Bool {
