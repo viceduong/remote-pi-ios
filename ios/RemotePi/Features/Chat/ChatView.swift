@@ -667,7 +667,7 @@ struct MessageBubble: View {
         let full = NSRange(location: 0, length: ns.length)
         ns.enumerateAttribute(.paragraphStyle, in: full) { value, range, _ in
             let style = (value as? NSMutableParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
-            style.paragraphSpacing = 4
+            style.paragraphSpacing = 2
             style.paragraphSpacingBefore = 0
             style.lineSpacing = 2
             ns.addAttribute(.paragraphStyle, value: style, range: range)
@@ -675,7 +675,7 @@ struct MessageBubble: View {
         // Ensure base paragraph style for plain text without markdown blocks
         if ns.length > 0 && ns.attribute(.paragraphStyle, at: 0, effectiveRange: nil) == nil {
             let style = NSMutableParagraphStyle()
-            style.paragraphSpacing = 4
+            style.paragraphSpacing = 2
             style.paragraphSpacingBefore = 0
             style.lineSpacing = 2
             ns.addAttribute(.paragraphStyle, value: style, range: full)

@@ -232,7 +232,12 @@ final class ChatViewModel: ObservableObject {
                 ))
                 await saveOfflineQueue()
             } else if case APIError.http(409, _, "session_live") = error {
-                // Single-writer invariant: stop the host Pi process first.
+                if !force {
+                    // One-shot force takeover: retry with ?force=1 which converts
+                    // the read-only mirror into a bridge-owned agent.
+                    await send(text, force: true)
+                    return
+                }
                 errorMessage = "Host Pi owns this session — stop it in the terminal before sending here."
             } else {
                 errorMessage = error.localizedDescription
