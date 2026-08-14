@@ -110,7 +110,7 @@ struct ChatView: View {
             GeometryReader { geo in
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(spacing: 8) {
+                    LazyVStack(spacing: 12) {
                         if viewModel.messages.isEmpty && viewModel.isLoadingHistory {
                             HStack {
                                 ProgressView()
@@ -158,7 +158,7 @@ struct ChatView: View {
                         }
                     }
                     .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
+                    .padding(.vertical, 12)
                     // Bottom marker + reliable open-at-bottom clamp (extracted
                     // so the type checker isn't overwhelmed).
                     .background(BottomMarkerAndClamp(
@@ -529,7 +529,7 @@ struct MessageBubble: View {
     }
 
     private var assistantBubble: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             if let thinking = message.thinking, !thinking.isEmpty {
                 ThinkingView(text: thinking)
             }
@@ -539,12 +539,10 @@ struct MessageBubble: View {
                     // O(n²) and causes scroll lag on long messages.
                     Text(message.text)
                         .font(.system(size: scaled(17)))
-                        .lineSpacing(2)
                         .textSelection(.enabled)
                 } else {
                     Text(displayText)
                         .font(.system(size: scaled(17)))
-                        .lineSpacing(2)
                         .textSelection(.enabled)
                         .onAppear { loadParsedText() }
                         .onChange(of: message.text) { _ in
@@ -632,12 +630,8 @@ struct MessageBubble: View {
     }
 
     /// Plain text until the off-main markdown parse lands (cached by text).
-    /// Paragraph spacing tightened so a single blank line doesn't look like a double gap.
     private var displayText: AttributedString {
-        if let p = parsedText { return p }
-        var a = AttributedString(message.text)
-        // Tighten default markdown paragraph spacing when not yet parsed
-        return a
+        parsedText ?? AttributedString(message.text)
     }
 
     private static let markdownCache = NSCache<NSString, NSAttributedString>()
@@ -658,29 +652,11 @@ struct MessageBubble: View {
     }
 
     private static func parseMarkdown(_ text: String) -> NSAttributedString {
-        let parsed = (try? AttributedString(
+        NSAttributedString((try? AttributedString(
             markdown: text,
             options: AttributedString.MarkdownParsingOptions(
                 interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        )) ?? AttributedString(text)
-        let ns = NSMutableAttributedString(attributedString: NSAttributedString(parsed))
-        let full = NSRange(location: 0, length: ns.length)
-        ns.enumerateAttribute(.paragraphStyle, in: full) { value, range, _ in
-            let style = (value as? NSMutableParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
-            style.paragraphSpacing = 2
-            style.paragraphSpacingBefore = 0
-            style.lineSpacing = 2
-            ns.addAttribute(.paragraphStyle, value: style, range: range)
-        }
-        // Ensure base paragraph style for plain text without markdown blocks
-        if ns.length > 0 && ns.attribute(.paragraphStyle, at: 0, effectiveRange: nil) == nil {
-            let style = NSMutableParagraphStyle()
-            style.paragraphSpacing = 2
-            style.paragraphSpacingBefore = 0
-            style.lineSpacing = 2
-            ns.addAttribute(.paragraphStyle, value: style, range: full)
-        }
-        return ns
+        )) ?? AttributedString(text))
     }
 
     private func rendered(_ text: String) -> AttributedString {
