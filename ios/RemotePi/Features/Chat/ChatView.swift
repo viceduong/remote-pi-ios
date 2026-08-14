@@ -529,7 +529,7 @@ struct MessageBubble: View {
     }
 
     private var assistantBubble: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             if let thinking = message.thinking, !thinking.isEmpty {
                 ThinkingView(text: thinking)
             }
@@ -539,10 +539,12 @@ struct MessageBubble: View {
                     // O(n²) and causes scroll lag on long messages.
                     Text(message.text)
                         .font(.system(size: scaled(17)))
+                        .lineSpacing(3)
                         .textSelection(.enabled)
                 } else {
                     Text(displayText)
                         .font(.system(size: scaled(17)))
+                        .lineSpacing(3)
                         .textSelection(.enabled)
                         .onAppear { loadParsedText() }
                         .onChange(of: message.text) { _ in
@@ -630,8 +632,12 @@ struct MessageBubble: View {
     }
 
     /// Plain text until the off-main markdown parse lands (cached by text).
+    /// Paragraph spacing tightened so a single blank line doesn't look like a double gap.
     private var displayText: AttributedString {
-        parsedText ?? AttributedString(message.text)
+        if let p = parsedText { return p }
+        var a = AttributedString(message.text)
+        // Tighten default markdown paragraph spacing when not yet parsed
+        return a
     }
 
     private static let markdownCache = NSCache<NSString, NSAttributedString>()
@@ -652,11 +658,29 @@ struct MessageBubble: View {
     }
 
     private static func parseMarkdown(_ text: String) -> NSAttributedString {
-        NSAttributedString((try? AttributedString(
+        let parsed = (try? AttributedString(
             markdown: text,
             options: AttributedString.MarkdownParsingOptions(
                 interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        )) ?? AttributedString(text))
+        )) ?? AttributedString(text)
+        let ns = NSMutableAttributedString(attributedString: NSAttributedString(parsed))
+        let full = NSRange(location: 0, length: ns.length)
+        ns.enumerateAttribute(.paragraphStyle, in: full) { value, range, _ in
+            let style = (value as? NSMutableParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle ?? NSMutableParagraphStyle()
+            style.paragraphSpacing = 6
+            style.paragraphSpacingBefore = 0
+            style.lineSpacing = 2
+            ns.addAttribute(.paragraphStyle, value: style, range: range)
+        }
+        // Ensure base paragraph style for plain text without markdown blocks
+        if ns.length > 0 && ns.attribute(.paragraphStyle, at: 0, effectiveRange: nil) == nil {
+            let style = NSMutableParagraphStyle()
+            style.paragraphSpacing = 6
+            style.paragraphSpacingBefore = 0
+            style.lineSpacing = 2
+            ns.addAttribute(.paragraphStyle, value: style, range: full)
+        }
+        return ns
     }
 
     private func rendered(_ text: String) -> AttributedString {
