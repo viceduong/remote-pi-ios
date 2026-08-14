@@ -22,6 +22,15 @@ struct APIClient {
     let baseURL: URL
     let token: String
 
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.waitsForConnectivity = true
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 60
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: config)
+    }()
+
     init(baseURL: URL, token: String) {
         self.baseURL = baseURL
         self.token = token
@@ -32,6 +41,8 @@ struct APIClient {
         var req = URLRequest(url: url)
         req.httpMethod = method
         req.timeoutInterval = 30
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if !token.isEmpty {
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -45,7 +56,7 @@ struct APIClient {
     private func send(_ req: URLRequest) async throws -> Data {
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await URLSession.shared.data(for: req)
+            (data, response) = try await Self.session.data(for: req)
         } catch {
             if (error as NSError).code == NSURLErrorCancelled {
                 throw CancellationError()
@@ -53,6 +64,10 @@ struct APIClient {
             throw APIError.offline
         }
         guard let http = response as? HTTPURLResponse else { throw APIError.offline }
+        // Bound accidental proxy/error payloads before JSON decoding or UI work.
+        guard data.count <= 16 * 1024 * 1024 else {
+            throw APIError.decoding("response exceeded 16 MiB safety limit")
+        }
         guard (200...299).contains(http.statusCode) else {
             let body = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
             let nestedMessage = (body?["error"] as? [String: Any])?["message"] as? String
@@ -154,9 +169,11 @@ struct APIClient {
                 wrapper.total ?? 0, wrapper.pending?.map(\.text) ?? [], wrapper.working ?? false)
     }
 
-    func sendTurn(_ id: String, message: String, force: Bool = false) async throws -> TurnResponse {
+    func sendTurn(_ id: String, message: String, force: Bool = false,
+                  clientMessageId: String? = nil) async throws -> TurnResponse {
         let suffix = force ? "?force=1" : ""
-        return try await post("/api/sessions/\(id)/turn\(suffix)", body: TurnRequest(message: message))
+        return try await post("/api/sessions/\(id)/turn\(suffix)",
+                              body: TurnRequest(message: message, clientMessageId: clientMessageId))
     }
 
     struct ModelInfo: Decodable, Identifiable {

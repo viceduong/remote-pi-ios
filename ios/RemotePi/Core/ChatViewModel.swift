@@ -42,7 +42,8 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var working = false
     /// Locally-queued sends while offline (persisted, flushed on reconnect).
     @Published private(set) var offlinePending: [OfflineMessage] = []
-    private var offlineKey: String { "offlineQueue.\(sessionId)" }
+    private var flushingOffline = false
+    private let offlineStore: OfflineQueueStore
     /// Coalesced streamed deltas: batched flushes (~90ms) keep scrolling
     /// smooth instead of re-rendering per token.
     private var pendingDelta = ""
@@ -60,6 +61,9 @@ final class ChatViewModel: ObservableObject {
     private var eventSource: EventSource?
     private var pollTask: Task<Void, Never>?
     private var lifecycleActive = false
+    /// Viewport signal used for safe retention: live tails may evict old rows
+    /// only while the user is following the bottom.
+    private var viewportNearBottom = true
 
     /// Index of the assistant bubble currently receiving deltas.
     private var streamingIndex: Int?
@@ -68,6 +72,7 @@ final class ChatViewModel: ObservableObject {
     init(client: APIClient, sessionId: String) {
         self.client = client
         self.sessionId = sessionId
+        self.offlineStore = OfflineQueueStore(sessionId: sessionId)
     }
 
     // MARK: - Lifecycle
@@ -84,14 +89,33 @@ final class ChatViewModel: ObservableObject {
 
     func stop() {
         lifecycleActive = false
-        eventSource?.stop()
-        eventSource = nil
-        pollTask?.cancel()
-        pollTask = nil
+        suspendNetwork()
         flushTask?.cancel()
         flushTask = nil
         fileFlushTask?.cancel()
         fileFlushTask = nil
+        pendingDelta = ""
+        pendingDeltaIndex = nil
+        pendingFileMessages.removeAll()
+        streamingIndex = nil
+    }
+
+    /// iOS may suspend arbitrary long-lived sockets in the background. Stop
+    /// transport while inactive and reconcile from server truth on resume.
+    func suspendNetwork() {
+        eventSource?.stop()
+        eventSource = nil
+        pollTask?.cancel()
+        pollTask = nil
+    }
+
+    /// Resume transport after foregrounding. History reconciliation covers
+    /// events missed while the app was suspended.
+    func resumeNetwork() {
+        guard lifecycleActive, eventSource == nil else { return }
+        openStream()
+        startPolling()
+        Task { await refreshFromServer(); await loadQueue(); await flushOfflineQueue() }
     }
 
     /// Host-terminal / other-client activity reaches the app via the server's
@@ -150,13 +174,19 @@ final class ChatViewModel: ObservableObject {
         if !fresh.isEmpty { appendTail(fresh) }
     }
 
+    func setViewportNearBottom(_ value: Bool) {
+        viewportNearBottom = value
+    }
+
     // MARK: - Actions
 
     func send(_ text: String, force: Bool = false) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         pendingText = ""
-        let optimisticId = appendUserMessage(trimmed)
+        let clientMessageId = UUID().uuidString
+        let optimisticId = appendUserMessage(trimmed, clientMessageId: clientMessageId)
+        let wasStreaming = isStreaming
         // Immediate feedback: the response can take a second to start, and the
         // first SSE event may lag — show a waiting state right away.
         if !isStreaming {
@@ -165,29 +195,42 @@ final class ChatViewModel: ObservableObject {
             fileActivityAt = Date()
         }
         do {
-            let resp = try await client.sendTurn(sessionId, message: trimmed, force: force)
+            let resp = try await client.sendTurn(sessionId, message: trimmed, force: force,
+                                                 clientMessageId: clientMessageId)
             if resp.queued {
-                isStreaming = false
+                // Keep an existing turn's state intact. The queue item is a
+                // durable pending bubble; queue_update removes it on delivery.
                 queuedNote = "⏳ Queued — agent is busy, your message will go in when it finishes"
-                workingText = nil
-                if let id = resp.queueItemId {
-                    queuedItems.append(QueueItem(id: id, message: trimmed, status: "queued",
+                if let id = resp.queueItemId,
+                   !queuedItems.contains(where: { $0.id == id }) {
+                    queuedItems.append(QueueItem(id: id, clientMessageId: clientMessageId,
+                                                 message: trimmed, status: "queued",
                                                  queuedAt: nil, startedAt: nil, completedAt: nil, error: nil))
                 }
+            } else {
+                // Idempotent retry may resolve to an already-completed queue
+                // item. Remove the orphan optimistic bubble and reconcile.
+                messages.removeAll { $0.id == optimisticId }
+                await refreshFromServer()
             }
         } catch {
             if error is CancellationError {
                 messages.removeAll { $0.id == optimisticId }
-                isStreaming = false
-                workingText = nil
+                if !wasStreaming { isStreaming = false; workingText = nil }
                 return
             }
-            isStreaming = false
-            workingText = nil
             messages.removeAll { $0.id == optimisticId }
+            if !wasStreaming { isStreaming = false; workingText = nil }
             if case APIError.offline = error {
-                offlinePending.append(OfflineMessage(text: trimmed))
-                saveOfflineQueue()
+                guard offlinePending.count < 100 else {
+                    errorMessage = "Offline queue is full (100 messages). Reconnect or discard one first."
+                    return
+                }
+                offlinePending.append(OfflineMessage(
+                    text: trimmed,
+                    id: UUID(uuidString: clientMessageId) ?? UUID()
+                ))
+                await saveOfflineQueue()
             } else if case APIError.http(409, _, "session_live") = error {
                 // Single-writer invariant: stop the host Pi process first.
                 errorMessage = "Host Pi owns this session — stop it in the terminal before sending here."
@@ -198,8 +241,13 @@ final class ChatViewModel: ObservableObject {
     }
 
     func abort() async {
-        isStreaming = false
-        try? await client.abortTurn(sessionId)
+        do {
+            try await client.abortTurn(sessionId)
+            isStreaming = false
+            workingText = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     // MARK: - History (lazy, last-N pages)
@@ -207,6 +255,7 @@ final class ChatViewModel: ObservableObject {
     private func loadHistory() async {
         guard lifecycleActive else { return }
         isLoadingHistory = true
+        await loadOfflineQueue()
         defer { isLoadingHistory = false }
         do {
             let page = try await client.fetchMessages(sessionId, limit: 100)
@@ -216,19 +265,30 @@ final class ChatViewModel: ObservableObject {
             applyWorkingIndicator()
             hasMore = page.hasMore
             lowestFetchedTs = page.messages.compactMap { $0.timestamp }.min()
-            loadOfflineQueue()
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
-    /// Bound memory on very long sessions: drop far-from-viewport pages.
-    /// `lowestFetchedTs` stays correct, so scrolling up refetches the span.
-    private func evictIfNeeded() {
-        let maxRetained = 400
-        let trigger = 600
-        guard messages.count > trigger else { return }
-        messages.removeFirst(messages.count - maxRetained)
+    /// Bound live-tail memory without evicting freshly fetched history. When
+    /// the user follows the bottom, discard oldest rows; while reading history,
+    /// retain the visible/older side and reconcile the newest tail on return.
+    private func evictLiveTailIfNeeded() {
+        let maxRetained = 800
+        let trigger = 1_000
+        guard messages.count > trigger, viewportNearBottom else { return }
+        let dropped = messages.count - maxRetained
+        messages.removeFirst(dropped)
+        if let index = streamingIndex { streamingIndex = max(0, index - dropped) }
+        if let index = pendingDeltaIndex { pendingDeltaIndex = max(0, index - dropped) }
+    }
+
+    private func evictHistoryTailWhileBrowsing() {
+        let maxRetained = 2_000
+        guard !viewportNearBottom, messages.count > maxRetained else { return }
+        messages.removeLast(messages.count - maxRetained)
+        if let index = streamingIndex, index >= messages.count { streamingIndex = nil }
+        if let index = pendingDeltaIndex, index >= messages.count { pendingDeltaIndex = nil }
     }
 
     /// Fetch the next older page and prepend it (triggered at scroll top).
@@ -247,15 +307,21 @@ final class ChatViewModel: ObservableObject {
             let known = Set(messages.compactMap { $0.entryId })
             let fresh = page.messages.filter { $0.entryId == nil || !known.contains($0.entryId!) }
             guard !fresh.isEmpty else {
-                hasMore = false // duplicates only — no more new content (infinite-scroll guard)
+                // The cursor may land on a page containing only already-known
+                // rows because several entries share a timestamp. Keep the
+                // cursor alive and let the next scroll retry.
+                hasMore = page.hasMore
                 return
             }
-            // Remember the current top so the list can keep its position.
-            prependAnchor = messages.first?.id.uuidString
+            // Remember the current top so the view can keep its position.
+            prependAnchor = messages.first(where: { $0.role != .tool && !$0.isSystemNote })?.id
+                ?? messages.first?.id
+            if let index = streamingIndex { streamingIndex = index + fresh.count }
+            if let index = pendingDeltaIndex { pendingDeltaIndex = index + fresh.count }
             messages.insert(contentsOf: fresh, at: 0)
             hasMore = page.hasMore
             lowestFetchedTs = min(lowestFetchedTs ?? Int.max, page.messages.compactMap { $0.timestamp }.min() ?? Int.max)
-            evictIfNeeded()
+            evictHistoryTailWhileBrowsing()
         } catch {
             // transient — leave hasMore as-is so a later scroll retries
         }
@@ -298,6 +364,12 @@ final class ChatViewModel: ObservableObject {
                 self?.handle(frame: frame)
             }
         }
+        source.onError = { [weak self] message in
+            guard message.contains("401") || message.contains("403") || message.contains("404") else { return }
+            Task { @MainActor in
+                self?.errorMessage = "Event stream unavailable: \(message)"
+            }
+        }
         eventSource = source
         source.start()
     }
@@ -308,6 +380,7 @@ final class ChatViewModel: ObservableObject {
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return
         }
+        defer { evictLiveTailIfNeeded() }
         switch frame.event {
         case "agent_start", "turn_start":
             isStreaming = true
@@ -315,8 +388,14 @@ final class ChatViewModel: ObservableObject {
             queuedNote = nil
             workingText = "Working…"
             fileActivityAt = Date()
-        case "agent_end", "turn_end":
+        case "turn_end":
+            // Server keeps ownership reserved through the internal gap before
+            // agent_end; keep the UI busy as well.
+            isStreaming = true
+            workingText = "Finishing…"
+        case "agent_end":
             isStreaming = false
+            working = false
             workingText = nil
         case "tool_execution_start":
             // Status-only: no bubble (message events render the result), but
@@ -338,7 +417,7 @@ final class ChatViewModel: ObservableObject {
             if let msg = obj["message"] as? [String: Any] {
                 if (msg["role"] as? String) == "user" { break }
                 if Self.isToolMessage(msg) { upsertTool(from: msg, finalize: true) }
-                else { upsertAssistant(from: msg, finalize: true); isStreaming = false }
+                else { upsertAssistant(from: msg, finalize: true) }
             }
         case "agent_exited":
             isStreaming = false
@@ -347,7 +426,8 @@ final class ChatViewModel: ObservableObject {
             if let items = obj["items"] as? [[String: Any]] {
                 let parsed = items.compactMap { d -> QueueItem? in
                     guard let id = d["id"] as? String, let message = d["message"] as? String else { return nil }
-                    return QueueItem(id: id, message: message, status: d["status"] as? String ?? "queued",
+                    return QueueItem(id: id, clientMessageId: d["clientMessageId"] as? String,
+                                     message: message, status: d["status"] as? String ?? "queued",
                                      queuedAt: nil, startedAt: nil, completedAt: nil, error: nil)
                 }
                 queuedItems = parsed.filter { $0.status != "done" && $0.status != "failed" }
@@ -356,6 +436,7 @@ final class ChatViewModel: ObservableObject {
         case "agent_crashed":
             // Server auto-respawns; surface it instead of a silent stop.
             isStreaming = false
+            working = false
             workingText = "Agent crashed — restarting…"
             fileActivityAt = Date()
         case "file_update":
@@ -367,7 +448,9 @@ final class ChatViewModel: ObservableObject {
                 if role == "user" {
                     let text = (msg["text"] as? String) ?? ""
                     if !text.isEmpty {
-                        queuedItems.removeAll { item in item.message == text || item.message.prefix(40) == String(text.prefix(40)) }
+                        if let idx = queuedItems.firstIndex(where: { $0.message == text }) {
+                            queuedItems.remove(at: idx)
+                        }
                         if queuedItems.isEmpty { queuedNote = nil }
                     }
                 } else {
@@ -405,15 +488,15 @@ final class ChatViewModel: ObservableObject {
     private func appendTail(_ tail: [ChatMessage]) {
         ChatMerger.append(&messages, tail)
         reconcileQueued(tail)
+        evictLiveTailIfNeeded()
     }
 
     /// Remove queued chips once their prompt actually streams in as a message.
     private func reconcileQueued(_ newMessages: [ChatMessage]) {
         guard !queuedItems.isEmpty else { return }
         for m in newMessages where m.role == .user {
-            let head = String(m.text.prefix(40))
-            queuedItems.removeAll { item in
-                item.message.prefix(40) == head || item.message == m.text
+            if let idx = queuedItems.firstIndex(where: { $0.message == m.text }) {
+                queuedItems.remove(at: idx)
             }
             if queuedItems.isEmpty { queuedNote = nil }
         }
@@ -431,47 +514,61 @@ final class ChatViewModel: ObservableObject {
     }
 
     /// Persisted offline queue helpers.
-    private func loadOfflineQueue() {
-        if let data = UserDefaults.standard.data(forKey: offlineKey),
-           let decoded = try? JSONDecoder().decode([OfflineMessage].self, from: data) {
-            offlinePending = decoded
+    private func loadOfflineQueue() async {
+        if let stored = await offlineStore.load() {
+            offlinePending = stored
             return
         }
-        // Migrate the original text-only queue without losing messages.
-        if let legacy = UserDefaults.standard.array(forKey: offlineKey) as? [String] {
-            offlinePending = legacy.map { OfflineMessage(text: $0) }
-            saveOfflineQueue()
+        // Migrate the original UserDefaults queue without losing messages.
+        let legacyKey = "offlineQueue.\(sessionId)"
+        if let data = UserDefaults.standard.data(forKey: legacyKey),
+           let decoded = try? JSONDecoder().decode([OfflineMessage].self, from: data) {
+            offlinePending = Array(decoded.prefix(100))
+            await saveOfflineQueue()
+            UserDefaults.standard.removeObject(forKey: legacyKey)
+        } else if let legacy = UserDefaults.standard.array(forKey: legacyKey) as? [String] {
+            offlinePending = legacy.prefix(100).map { OfflineMessage(text: $0) }
+            await saveOfflineQueue()
+            UserDefaults.standard.removeObject(forKey: legacyKey)
         }
     }
 
-    private func saveOfflineQueue() {
-        if let data = try? JSONEncoder().encode(offlinePending) {
-            UserDefaults.standard.set(data, forKey: offlineKey)
-        }
+    private func saveOfflineQueue() async {
+        await offlineStore.save(offlinePending)
     }
 
     func flushOfflineQueue() async {
+        guard !flushingOffline else { return }
+        flushingOffline = true
+        defer { flushingOffline = false }
         while let item = offlinePending.first {
             do {
-                _ = try await client.sendTurn(sessionId, message: item.text)
+                let response = try await client.sendTurn(sessionId, message: item.text,
+                                                         clientMessageId: item.id.uuidString)
                 offlinePending.removeFirst()
+                if response.queued { await loadQueue() }
             } catch {
                 break // still offline — keep the rest
             }
         }
-        saveOfflineQueue()
+        await saveOfflineQueue()
         if offlinePending.isEmpty { queuedNote = nil }
     }
 
     func discardOffline(_ id: UUID) {
         offlinePending.removeAll { $0.id == id }
-        saveOfflineQueue()
+        Task { await saveOfflineQueue() }
     }
 
     func cancelQueued(_ itemId: String) async {
-        queuedItems.removeAll { $0.id == itemId }
-        if queuedItems.isEmpty { queuedNote = nil }
-        try? await client.cancelQueued(sessionId, itemId: itemId)
+        do {
+            try await client.cancelQueued(sessionId, itemId: itemId)
+            queuedItems.removeAll { $0.id == itemId }
+            if queuedItems.isEmpty { queuedNote = nil }
+        } catch {
+            errorMessage = error.localizedDescription
+            await loadQueue()
+        }
     }
 
     /// pi marks tool results with a toolName (roles: toolResult/assistant/user).
@@ -500,8 +597,9 @@ final class ChatViewModel: ObservableObject {
         }
         if let msg = obj["message"] as? [String: Any], Self.isToolMessage(msg) {
             // Tool result streaming: append deltas to the last tool bubble.
-            guard type == "text_delta", let delta = ev["delta"] as? String,
-                  let idx = messages.lastIndex(where: { $0.role == .tool }) else { return }
+            guard type == "text_delta", let delta = ev["delta"] as? String else { return }
+            let idx = streamingIndex ?? messages.lastIndex(where: { $0.role == .tool })
+            guard let idx else { return }
             accumulateDelta(delta, into: idx)
             return
         }
@@ -572,16 +670,31 @@ final class ChatViewModel: ObservableObject {
     /// Tool-result messages render as monospace tool blocks, like the terminal.
     private func upsertTool(from json: [String: Any], finalize: Bool) {
         let mapped = ChatMessage.fromAgentMessage(json)
-        if let idx = messages.lastIndex(where: { $0.role == .tool && $0.toolName == mapped.toolName }) {
+        let existingIndex: Int? = {
+            if let entryId = mapped.entryId {
+                return messages.lastIndex(where: { $0.entryId == entryId })
+            }
+            if let streamingIndex, messages.indices.contains(streamingIndex),
+               messages[streamingIndex].role == .tool {
+                return streamingIndex
+            }
+            return nil
+        }()
+        let idx: Int
+        if let existingIndex {
+            idx = existingIndex
             if finalize {
-                messages[idx] = mapped
-            } else if messages[idx].text.isEmpty && !mapped.text.isEmpty {
-                messages[idx].text = mapped.text
+                var replacement = mapped
+                replacement.id = messages[existingIndex].id
+                messages[existingIndex] = replacement
+            } else if !mapped.text.isEmpty {
+                messages[existingIndex].text = mapped.text
             }
         } else {
             messages.append(mapped)
+            idx = messages.count - 1
         }
-        streamingIndex = nil
+        streamingIndex = finalize ? nil : idx
     }
 
     /// Replace the in-progress bubble with the canonical mapped message.
@@ -589,12 +702,17 @@ final class ChatViewModel: ObservableObject {
         let mapped = ChatMessage.fromAgentMessage(json)
         guard let idx = ensureStreamingBubble() else { return }
         var current = messages[idx]
-        // Preserve streamed text while the canonical copy is incomplete.
-        if finalize || !mapped.text.isEmpty {
+        // Preserve streamed text while the canonical copy is incomplete or
+        // message_end carries only metadata/tool calls.
+        if !mapped.text.isEmpty || current.text.isEmpty {
             current = mapped
-        } else if !current.text.isEmpty {
+        } else {
+            current.entryId = mapped.entryId ?? current.entryId
             current.thinking = mapped.thinking ?? current.thinking
-            if mapped.toolCalls.isEmpty { current.toolCalls = mapped.toolCalls }
+            if !mapped.toolCalls.isEmpty { current.toolCalls = mapped.toolCalls }
+            current.isError = mapped.isError
+            current.errorMessage = mapped.errorMessage ?? current.errorMessage
+            current.model = mapped.model ?? current.model
         }
         messages[idx] = current
         if finalize {
@@ -603,8 +721,10 @@ final class ChatViewModel: ObservableObject {
     }
 
     @discardableResult
-    private func appendUserMessage(_ text: String) -> UUID {
-        let message = ChatMessage(entryId: nil, role: .user, text: text, thinking: nil,
+    private func appendUserMessage(_ text: String, clientMessageId: String) -> String {
+        let message = ChatMessage(id: "client:\(clientMessageId)", entryId: nil,
+                                  clientMessageId: clientMessageId,
+                                  role: .user, text: text, thinking: nil,
                                   toolCalls: [], toolActivity: nil,
                                   isError: false, toolName: nil, isSystemNote: false,
                                   model: nil, errorMessage: nil,

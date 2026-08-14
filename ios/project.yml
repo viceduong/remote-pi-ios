@@ -28,7 +28,6 @@ targets:
         CFBundleVersion: "60"
         LSRequiresIPhoneOS: true
         NSAppTransportSecurity:
-          NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
         NSLocalNetworkUsageDescription: Remote Pi connects to your pi agent server on your local network or Tailscale VPN.
         UIApplicationSceneManifest:

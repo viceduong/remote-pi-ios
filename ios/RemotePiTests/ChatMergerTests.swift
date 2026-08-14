@@ -57,4 +57,18 @@ final class ChatMergerTests: XCTestCase {
         ChatMerger.append(&list, [msg(role: .assistant, text: "second answer", ts: 2)])
         XCTAssertEqual(list.count, 2)
     }
+
+    func testRepeatedPromptWithSamePrefixWithinWindowIsNotDropped() {
+        var list = [msg(entryId: "x1", role: .user, text: "please inspect this repository", ts: 1000)]
+        ChatMerger.append(&list, [msg(entryId: "x2", role: .user,
+                                     text: "please inspect this repository deeply", ts: 1001)])
+        XCTAssertEqual(list.count, 2)
+    }
+
+    func testReplacementPreservesSwiftUIIdentity() {
+        var list = [msg(entryId: "a1", text: "partial", ts: 100)]
+        let originalID = list[0].id
+        ChatMerger.append(&list, [msg(entryId: "a1", text: "partial complete", ts: 100)])
+        XCTAssertEqual(list[0].id, originalID)
+    }
 }

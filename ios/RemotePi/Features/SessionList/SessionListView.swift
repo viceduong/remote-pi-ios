@@ -3,6 +3,11 @@ import SwiftUI
 /// Session list for one connected server — create, resume, delete, navigate to chat.
 @MainActor
 struct SessionListView: View {
+    private static let shortDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return formatter
+    }()
     let server: ServerConfig
     @Environment(\.theme) private var theme
 
@@ -16,6 +21,7 @@ struct SessionListView: View {
     @State private var errorMessage: String?
     @State private var serverInfo: ServerInfo?
     @State private var openSession: SessionSummary?
+    @State private var loadGeneration = 0
 
     private var client: APIClient {
         APIClient(baseURL: server.url ?? URL(string: "http://localhost")!, token: server.token)
@@ -216,14 +222,20 @@ struct SessionListView: View {
     }
 
     private func load() async {
+        loadGeneration += 1
+        let generation = loadGeneration
         loading = true
         defer { loading = false }
         do {
-            serverInfo = try await client.fetchServerInfo()
+            let info = try await client.fetchServerInfo()
             let page = try await client.listSessions(limit: 50)
+            guard generation == loadGeneration else { return }
+            serverInfo = info
             sessions = page.sessions
             hasMore = page.hasMore
         } catch {
+            guard generation == loadGeneration else { return }
+            serverInfo = nil
             errorMessage = error.localizedDescription
         }
     }
@@ -232,14 +244,16 @@ struct SessionListView: View {
     private func loadMore() async {
         guard hasMore, !isLoadingMore,
               let oldest = sessions.compactMap({ $0.lastMessageAt ?? $0.lastActivityAt }).min() else { return }
+        let generation = loadGeneration
         isLoadingMore = true
         defer { isLoadingMore = false }
         do {
             let page = try await client.listSessions(limit: 50, before: oldest)
+            guard generation == loadGeneration else { return }
             let known = Set(sessions.map { $0.id })
             let fresh = page.sessions.filter { !known.contains($0.id) }
             guard !fresh.isEmpty else {
-                hasMore = false // duplicates only — no more new content (infinite-scroll guard)
+                hasMore = page.hasMore
                 return
             }
             sessions.append(contentsOf: fresh)
@@ -251,9 +265,12 @@ struct SessionListView: View {
 
     /// 5s refresh merges the newest page without collapsing the pagination.
     private func loadQuiet() async {
+        let generation = loadGeneration
         do {
-            serverInfo = try await client.fetchServerInfo()
+            let info = try await client.fetchServerInfo()
             let page = try await client.listSessions(limit: 50)
+            guard generation == loadGeneration else { return }
+            serverInfo = info
             var merged = sessions
             var byId = Dictionary(uniqueKeysWithValues: merged.map { ($0.id, $0) })
             for s in page.sessions {
@@ -263,7 +280,8 @@ struct SessionListView: View {
             if merged.count < sessions.count { merged = sessions } // never shrink loaded pages
             sessions = merged
         } catch {
-            // keep showing the last good list
+            // keep showing the last good list, but clear stale connectivity.
+            if generation == loadGeneration { serverInfo = nil }
         }
     }
 
@@ -303,8 +321,6 @@ struct SessionListView: View {
         if delta < 3600 { return "\(Int(delta / 60))m ago" }
         if delta < 86400 { return "\(Int(delta / 3600))h ago" }
         if delta < 7 * 86400 { return "\(Int(delta / 86400))d ago" }
-        let fmt = DateFormatter()
-        fmt.dateFormat = "MMM d"
-        return fmt.string(from: date)
+        return Self.shortDateFormatter.string(from: date)
     }
 }

@@ -50,8 +50,9 @@ struct SessionSummary: Codable, Identifiable, Hashable {
 }
 
 /// Server-owned prompt queue item (durable outbox).
-struct QueueItem: Decodable, Identifiable {
+struct QueueItem: Decodable, Identifiable, Equatable {
     let id: String
+    let clientMessageId: String?
     let message: String
     let status: String
     let queuedAt: Int?
@@ -147,6 +148,7 @@ struct AnyJSON: Decodable {
 /// POST /api/sessions/:id/turn
 struct TurnRequest: Encodable {
     let message: String
+    let clientMessageId: String?
 }
 
 struct TurnResponse: Decodable {
@@ -162,9 +164,13 @@ enum MessageRole: String, Codable {
 }
 
 struct ChatMessage: Identifiable, Equatable {
-    let id = UUID()
+    /// Stable identity for SwiftUI. Server entries use pi IDs; optimistic
+    /// messages use a client-generated ID and are replaced in-place on echo.
+    var id: String
     /// pi entry id ("m…") — enables forking from this message.
     var entryId: String?
+    /// Client idempotency key for optimistic/offline sends.
+    var clientMessageId: String?
     var role: MessageRole
     var text: String
     var thinking: String?
@@ -179,8 +185,29 @@ struct ChatMessage: Identifiable, Equatable {
     var errorMessage: String?
     var timestamp: Int?
 
+    init(id: String? = nil, entryId: String? = nil, clientMessageId: String? = nil,
+         role: MessageRole, text: String, thinking: String?, toolCalls: [ToolCall],
+         toolActivity: ToolActivity?, isError: Bool, toolName: String?,
+         isSystemNote: Bool, model: String?, errorMessage: String?, timestamp: Int?) {
+        self.id = id ?? entryId.map { "entry:\($0)" } ?? "local:\(UUID().uuidString)"
+        self.entryId = entryId
+        self.clientMessageId = clientMessageId
+        self.role = role
+        self.text = text
+        self.thinking = thinking
+        self.toolCalls = toolCalls
+        self.toolActivity = toolActivity
+        self.isError = isError
+        self.toolName = toolName
+        self.isSystemNote = isSystemNote
+        self.model = model
+        self.errorMessage = errorMessage
+        self.timestamp = timestamp
+    }
+
     static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
-        lhs.id == rhs.id
+        lhs.id == rhs.id && lhs.entryId == rhs.entryId && lhs.role == rhs.role
+            && lhs.text == rhs.text && lhs.thinking == rhs.thinking
     }
 
     /// Build a display message from a pi AgentMessage JSON blob (same mapping
@@ -195,7 +222,9 @@ struct ChatMessage: Identifiable, Equatable {
                 : (MessageRole(rawValue: rawRole) ?? .assistant)
             let wireCalls = (json["toolCalls"] as? [[String: Any]]) ?? []
             return ChatMessage(
+                id: (json["id"] as? String).map { "entry:\($0)" },
                 entryId: json["id"] as? String,
+                clientMessageId: json["clientMessageId"] as? String,
                 role: role,
                 text: text,
                 thinking: json["thinking"] as? String,
@@ -265,15 +294,19 @@ struct ChatMessage: Identifiable, Equatable {
 
         let model: String?
         if let m = json["model"] as? String, !m.isEmpty {
-            model = m
-        } else if let p = json["provider"] as? String, let m = json["model"] as? String {
-            model = "\(p)/\(m)"
+            if let p = json["provider"] as? String, !p.isEmpty {
+                model = "\(p)/\(m)"
+            } else {
+                model = m
+            }
         } else {
             model = nil
         }
 
         return ChatMessage(
+            id: (json["id"] as? String).map { "entry:\($0)" },
             entryId: json["id"] as? String,
+            clientMessageId: json["clientMessageId"] as? String,
             role: role,
             text: text,
             thinking: thinking,
@@ -401,40 +434,54 @@ struct ContentBlock: Decodable {
 /// JSON blob that can hold arbitrary tool arguments.
 enum JSONValue: Decodable {
     case object([String: JSONValue])
+    case array([JSONValue])
     case string(String)
+    case number(Double)
+    case bool(Bool)
+    case null
 
     init(from decoder: Decoder) throws {
-        if let s = try? decoder.singleValueContainer().decode(String.self) {
-            // Arguments arrived as a JSON string — try to unpack it.
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() { self = .null }
+        else if let b = try? c.decode(Bool.self) { self = .bool(b) }
+        else if let n = try? c.decode(Double.self) { self = .number(n) }
+        else if let s = try? c.decode(String.self) {
+            // Arguments sometimes arrive as a JSON string — unpack objects
+            // while preserving ordinary strings verbatim.
             if let data = s.data(using: .utf8),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                self = .object(obj.mapValues { JSONValue.fromAny($0) })
+               let obj = try? JSONSerialization.jsonObject(with: data) {
+                self = JSONValue.fromAny(obj)
             } else {
                 self = .string(s)
             }
-        } else {
-            let c = try decoder.singleValueContainer()
-            let dict = try c.decode([String: JSONValue].self)
+        } else if let dict = try? c.decode([String: JSONValue].self) {
             self = .object(dict)
+        } else if let array = try? c.decode([JSONValue].self) {
+            self = .array(array)
+        } else {
+            throw DecodingError.dataCorruptedError(in: c, debugDescription: "Unsupported JSON value")
         }
     }
 
     static func fromAny(_ value: Any) -> JSONValue {
-        if let dict = value as? [String: Any] {
-            return .object(dict.mapValues { fromAny($0) })
-        }
+        if value is NSNull { return .null }
+        if let dict = value as? [String: Any] { return .object(dict.mapValues { fromAny($0) }) }
+        if let array = value as? [Any] { return .array(array.map { fromAny($0) }) }
         if let str = value as? String { return .string(str) }
+        if let bool = value as? Bool { return .bool(bool) }
+        if let number = value as? NSNumber { return .number(number.doubleValue) }
         return .string(String(describing: value))
     }
 
     /// Compact single-line summary used in tool chips.
     var summary: String {
         switch self {
-        case .string(let s):
-            return s.count > 60 ? String(s.prefix(60)) + "…" : s
-        case .object(let dict):
-            let parts = dict.map { "\($0.key): \($0.value.summary)" }
-            return parts.joined(separator: ", ")
+        case .string(let s): return s.count > 60 ? String(s.prefix(60)) + "…" : s
+        case .number(let n): return String(n)
+        case .bool(let b): return String(b)
+        case .null: return "null"
+        case .array(let values): return "[" + values.map(\.summary).joined(separator: ", ") + "]"
+        case .object(let dict): return dict.map { "\($0.key): \($0.value.summary)" }.joined(separator: ", ")
         }
     }
 }

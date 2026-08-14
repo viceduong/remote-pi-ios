@@ -88,13 +88,32 @@ final class RemotePiTests: XCTestCase {
 
     // MARK: - EventSource frame parsing (SSE)
 
-    func testSSEFrameParsing() {
-        // Reach into the parser via a small harness through URLSession is not
-        // feasible here; verify the wire format expectations of our server:
-        // event:/id:/data: lines then a blank line.
-        let frame = "event: file_update\nid: 12\ndata: {\"type\":\"file_update\"}\n\n"
-        XCTAssertTrue(frame.hasPrefix("event: file_update"))
-        XCTAssertTrue(frame.contains("id: 12"))
-        XCTAssertTrue(frame.hasSuffix("\n\n"))
+    func testSSEParserHandlesMultilineDataAndRetry() throws {
+        var parser = SSEParser()
+        XCTAssertNil(try parser.consume("id: 12"))
+        XCTAssertNil(try parser.consume("retry: 1500"))
+        XCTAssertNil(try parser.consume("data: first"))
+        XCTAssertNil(try parser.consume("data: second"))
+        let frame = try parser.consume("")
+        XCTAssertEqual(frame?.event, "message")
+        XCTAssertEqual(frame?.id, "12")
+        XCTAssertEqual(frame?.data, "first\nsecond")
+        XCTAssertEqual(parser.takeRetryMilliseconds(), 1500)
+    }
+
+    func testSSEParserDropsIncompleteEOFFrame() throws {
+        var parser = SSEParser()
+        XCTAssertNil(try parser.consume("event: partial"))
+        XCTAssertNil(try parser.consume("data: not terminated"))
+        parser.finish()
+        XCTAssertNil(try parser.consume(""))
+    }
+
+    func testSSEParserSupportsCRLFAndFieldsWithoutColon() throws {
+        var parser = SSEParser()
+        XCTAssertNil(try parser.consume("data: ok\r"))
+        XCTAssertNil(try parser.consume(":"))
+        let frame = try parser.consume("")
+        XCTAssertEqual(frame?.data, "ok")
     }
 }

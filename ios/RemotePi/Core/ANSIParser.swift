@@ -189,11 +189,19 @@ struct TerminalText: View {
         Text(AttributedString(base))
             .ifLet(maxLines) { view, lines in view.lineLimit(lines) }
             .onAppear { load() }
+            .onChange(of: text) { _ in
+                parsed = nil
+                load()
+            }
+            .onChange(of: fontSize) { _ in
+                parsed = nil
+                load()
+            }
     }
 
     private func load() {
         if parsed != nil { return }
-        let key = "\(fontSize)|\(text)" as NSString
+        let key = "\(fontSize)|\(UIColor(color).description)|\(text)" as NSString
         if let cached = Self.cache.object(forKey: key) {
             parsed = cached
             return

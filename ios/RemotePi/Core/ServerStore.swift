@@ -40,11 +40,12 @@ final class ServerStore: ObservableObject {
         }
         servers = decoded.map { stored in
             var server = stored
-            if let secret = Keychain.token(for: server.id) {
+            if let secret = Keychain.token(for: server.id), !secret.isEmpty {
                 server.token = secret
             } else if !server.token.isEmpty {
-                // Migrate existing plaintext profiles once.
-                if Keychain.save(server.token, for: server.id) { server.token = "" }
+                // Migrate existing plaintext profiles once. Keep the token in
+                // memory; save() must not overwrite it with an empty value.
+                _ = Keychain.save(server.token, for: server.id)
             }
             return server
         }
@@ -55,8 +56,17 @@ final class ServerStore: ObservableObject {
     private func save() {
         var persisted: [ServerConfig] = []
         for var server in servers {
-            let stored = Keychain.save(server.token, for: server.id)
-            if stored { server.token = "" }
+            if !server.token.isEmpty {
+                // Store non-empty secrets, then strip only the persisted copy.
+                // Empty-token writes would erase a valid existing Keychain item.
+                if Keychain.save(server.token, for: server.id) {
+                    server.token = ""
+                } else {
+                    // Never fall back to persisting bearer tokens in
+                    // UserDefaults when Keychain is unavailable.
+                    server.token = ""
+                }
+            }
             persisted.append(server)
         }
         guard let data = try? JSONEncoder().encode(persisted) else { return }
@@ -83,7 +93,9 @@ private enum Keychain {
 
     @discardableResult
     static func save(_ token: String, for account: String) -> Bool {
-        guard let data = token.data(using: .utf8) else { return false }
+        // Empty values are never valid secrets and must not erase an existing
+        // credential accidentally during profile persistence.
+        guard !token.isEmpty, let data = token.data(using: .utf8) else { return false }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

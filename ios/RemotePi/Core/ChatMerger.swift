@@ -9,6 +9,8 @@ enum ChatMerger {
     /// near-identical timestamp (covers optimistic copies vs server echoes).
     static func isDuplicate(_ m: ChatMessage, in existing: [ChatMessage]) -> Bool {
         if let eid = m.entryId, existing.contains(where: { $0.entryId == eid }) { return true }
+        if let clientId = m.clientMessageId,
+           existing.contains(where: { $0.clientMessageId == clientId }) { return true }
         guard let mts = m.timestamp else { return false }
         return existing.contains { other in
             guard let ots = other.timestamp else { return false }
@@ -29,7 +31,16 @@ enum ChatMerger {
         for m in tail {
             if let eid = m.entryId,
                let existingIdx = existing.firstIndex(where: { $0.entryId == eid }) {
-                existing[existingIdx] = m
+                var replacement = m
+                replacement.id = existing[existingIdx].id
+                existing[existingIdx] = replacement
+                continue
+            }
+            if let clientId = m.clientMessageId,
+               let existingIdx = existing.firstIndex(where: { $0.clientMessageId == clientId }) {
+                var replacement = m
+                replacement.id = existing[existingIdx].id
+                existing[existingIdx] = replacement
                 continue
             }
             if let lastIdx = existing.indices.last {
@@ -40,13 +51,15 @@ enum ChatMerger {
                     if let ats = last.timestamp, let bts = m.timestamp {
                         let continuation = abs(ats - bts) < 3000 && b.count > a.count && b.hasPrefix(a) && a.count >= 10
                         if continuation {
-                            existing[lastIdx] = m
+                            var replacement = m
+                            replacement.id = existing[lastIdx].id
+                            existing[lastIdx] = replacement
                             continue
                         }
                     }
                 }
             }
-            if isDuplicate(m, in: existing) { continue }
+            if isDuplicate(m, in: existing) || isDuplicate(m, in: toAdd) { continue }
             toAdd.append(m)
         }
         if !toAdd.isEmpty { existing.append(contentsOf: toAdd) }

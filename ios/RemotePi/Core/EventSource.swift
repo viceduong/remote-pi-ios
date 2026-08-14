@@ -7,209 +7,278 @@ struct SSEFrame {
     var id: String?
 }
 
+private enum SSEParserError: LocalizedError {
+    case frameTooLarge
+
+    var errorDescription: String? {
+        switch self {
+        case .frameTooLarge: return "SSE frame exceeded the 2 MiB safety limit"
+        }
+    }
+}
+
+/// Stateful SSE wire parser. It is confined to one EventSource task.
+struct SSEParser {
+    private static let maxFrameBytes = 2 * 1024 * 1024
+    private var event = SSEFrame()
+    private var retryMilliseconds: Int?
+    private var lastEventId: String?
+
+    mutating func consume(_ rawLine: String) throws -> SSEFrame? {
+        var line = rawLine
+        if line.last == "\r" { line.removeLast() }
+
+        if line.isEmpty {
+            let completed = event.data.isEmpty ? nil : event
+            event = SSEFrame()
+            return completed
+        }
+        if line.hasPrefix(":") { return nil }
+
+        let field: String
+        let value: String
+        if let colon = line.firstIndex(of: ":") {
+            field = String(line[..<colon])
+            var v = String(line[line.index(after: colon)...])
+            if v.first == " " { v.removeFirst() }
+            value = v
+        } else {
+            field = line
+            value = ""
+        }
+
+        switch field {
+        case "event": event.event = value
+        case "data":
+            event.data += event.data.isEmpty ? value : "\n\(value)"
+            guard event.data.utf8.count <= Self.maxFrameBytes else {
+                throw SSEParserError.frameTooLarge
+            }
+        case "id":
+            // SSE forbids NUL-containing IDs. Empty IDs reset the cursor.
+            guard !value.contains("\0") else { return nil }
+            event.id = value
+            lastEventId = value
+        case "retry":
+            if let milliseconds = Int(value), milliseconds >= 0 {
+                retryMilliseconds = milliseconds
+            }
+        default: break
+        }
+        return nil
+    }
+
+    /// Incomplete events at EOF are intentionally discarded. SSE dispatches
+    /// only after a blank-line terminator; reconnect replay handles recovery.
+    mutating func finish() {
+        event = SSEFrame()
+        retryMilliseconds = nil
+    }
+
+    mutating func takeRetryMilliseconds() -> Int? {
+        defer { retryMilliseconds = nil }
+        return retryMilliseconds
+    }
+
+    var cursor: String? { lastEventId }
+}
+
 /**
- * Minimal, dependency-free SSE client built on URLSession streaming.
+ * Dependency-free SSE client built on URLSession.AsyncBytes.
  *
- * - Parses the SSE wire format (event/data/id lines + blank-line terminator)
- * - Auto-reconnects with exponential backoff, sending `Last-Event-ID` so the
- *   server can replay missed events from its ring buffer
- * - Fires a callback for every parsed frame on the main queue
- *
- * iOS 15 compatible (URLSession dataTask streaming).
+ * The parser and reconnect loop are single-task confined. UI callbacks are
+ * always delivered on MainActor. Reconnects use Last-Event-ID, server retry
+ * hints, bounded exponential backoff, and jitter.
  */
-final class EventSource: NSObject, URLSessionDataDelegate {
-    enum State {
+final class EventSource {
+    enum State: Equatable {
         case disconnected, connecting, connected
     }
 
     var onFrame: ((SSEFrame) -> Void)?
     var onStateChange: ((State) -> Void)?
+    var onError: ((String) -> Void)?
 
     private let url: URL
     private let token: String
-    private var session: URLSession!
-    private var task: URLSessionDataTask?
-    private var lastEventId: String?
-    private var reconnectAttempts = 0
-    private var reconnectTask: Task<Void, Never>?
-    private var closed = false
-    /// Parsing lives on this serial background queue (delegateQueue) so heavy
-    /// SSE frames never block the main thread; shared state is lock-guarded.
-    private let parseQueue: OperationQueue = {
-        let q = OperationQueue()
-        q.maxConcurrentOperationCount = 1 // serial, like a dedicated queue
-        return q
-    }()
+    private let session: URLSession
+    private var runTask: Task<Void, Never>?
     private let lock = NSLock()
-    private var buffer = Data()
-    private var frame = SSEFrame()
+    private var closed = true
+    private var generation = 0
+    private var lastEventId: String?
+    private var retryDelay: TimeInterval = 1
 
     init(url: URL, token: String) {
         self.url = url
         self.token = token
-        super.init()
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 60
-        // SSE is long-lived; keepalive frames prevent request-idle timeout.
         config.timeoutIntervalForResource = 24 * 60 * 60
-        session = URLSession(configuration: config, delegate: self, delegateQueue: parseQueue)
+        config.waitsForConnectivity = true
+        config.httpAdditionalHeaders = [
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache",
+        ]
+        self.session = URLSession(configuration: config)
     }
 
     func start() {
-        lock.lock(); closed = false; lock.unlock()
-        connect()
+        lock.lock()
+        guard runTask == nil else { lock.unlock(); return }
+        closed = false
+        generation += 1
+        let currentGeneration = generation
+        lock.unlock()
+        runTask = Task { [weak self] in
+            await self?.run(generation: currentGeneration)
+        }
     }
 
     func stop() {
-        lock.lock(); closed = true; lock.unlock()
-        reconnectTask?.cancel()
+        lock.lock()
+        closed = true
+        generation += 1
+        let task = runTask
+        runTask = nil
+        lock.unlock()
         task?.cancel()
-        task = nil
+        emitState(.disconnected, generation: nil)
     }
 
-    private func connect() {
-        lock.lock()
-        let shouldConnect = !closed
-        // A partial frame belongs to the old HTTP response, never the new one.
-        buffer.removeAll(keepingCapacity: true)
-        frame = SSEFrame()
-        lock.unlock()
-        guard shouldConnect else { return }
-        setState(.connecting)
-        var req = URLRequest(url: url)
-        req.timeoutInterval = 60
-        if !token.isEmpty {
-            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
-        lock.lock(); let lastEventId = self.lastEventId; lock.unlock()
-        if let lastEventId {
-            req.setValue(lastEventId, forHTTPHeaderField: "Last-Event-ID")
-        }
-        task = session.dataTask(with: req)
-        task?.resume()
+    private func isCurrent(_ generation: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return !closed && self.generation == generation
     }
 
-    private func scheduleReconnect() {
-        lock.lock()
-        let shouldReconnect = !closed
-        let delay = min(30, pow(2.0, Double(reconnectAttempts)))
-        reconnectAttempts += 1
-        lock.unlock()
-        guard shouldReconnect else { return }
-        setState(.connecting)
-        reconnectTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            guard !Task.isCancelled else { return }
-            self?.connect()
-        }
+    private func currentCursor() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return lastEventId
     }
 
-    // MARK: - URLSessionDataDelegate
-
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        lock.lock(); buffer.append(data); lock.unlock()
-        parseBuffer()
+    private func updateCursor(_ cursor: String?) {
+        guard let cursor else { return }
+        lock.lock(); lastEventId = cursor; lock.unlock()
     }
 
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        lock.lock(); let isClosed = closed; lock.unlock()
-        guard !isClosed else { return }
-        // EOF is not a successful end for an SSE subscription. Flush any
-        // complete data frame, then reconnect with the last parsed event ID.
-        finishPendingFrame()
-        scheduleReconnect()
-    }
+    private func run(generation: Int) async {
+        var parser = SSEParser()
+        var openedAt: Date?
 
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
-                    didReceive response: URLResponse,
-                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        if let http = response as? HTTPURLResponse {
-            if (200...299).contains(http.statusCode) {
-                setState(.connected)
-                lock.lock(); reconnectAttempts = 0; lock.unlock()
-            } else {
-                setState(.disconnected)
-                // Do not parse an HTML/JSON error body as SSE frames.
-                completionHandler(.cancel)
-                dataTask.cancel()
-                return
+        while isCurrent(generation) {
+            emitState(.connecting, generation: generation)
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 60
+            if !token.isEmpty {
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             }
-        }
-        completionHandler(.allow)
-    }
-
-    // MARK: - SSE parsing
-
-    private func parseBuffer() {
-        lock.lock(); let lines = drainLines(); lock.unlock()
-        for line in lines { handleLine(line) }
-    }
-
-    /// Extract complete newline-terminated lines from the buffered data.
-    private func drainLines() -> [String] {
-        var out: [String] = []
-        while let lineEnd = buffer.firstIndex(of: 0x0A) {
-            let end = buffer.index(after: lineEnd)
-            let lineData = buffer[buffer.startIndex..<lineEnd]
-            buffer.removeSubrange(buffer.startIndex..<end)
-            out.append(String(decoding: lineData, as: UTF8.self).replacingOccurrences(of: "\r", with: ""))
-        }
-        return out
-    }
-
-    
-
-    private func finishPendingFrame() {
-        lock.lock()
-        let remainder = buffer
-        buffer.removeAll(keepingCapacity: true)
-        lock.unlock()
-        if !remainder.isEmpty {
-            for line in remainder.split(separator: "\n", omittingEmptySubsequences: false) {
-                handleLine(String(line).replacingOccurrences(of: "\r", with: ""))
+            if let cursor = currentCursor(), !cursor.isEmpty {
+                request.setValue(cursor, forHTTPHeaderField: "Last-Event-ID")
             }
-        }
-        lock.lock()
-        let completed = frame
-        frame = SSEFrame()
-        lock.unlock()
-        if !completed.data.isEmpty {
-            if let id = completed.id {
-                lock.lock(); lastEventId = id; lock.unlock()
-            }
-            onFrame?(completed)
-        }
-    }
 
-    private func handleLine(_ line: String) {
-        if line.isEmpty {
-            // Frame terminator — dispatch and reset.
-            let completed = frame
-            frame = SSEFrame()
-            if !completed.data.isEmpty {
-                if let id = completed.id {
-                    lock.lock(); lastEventId = id; lock.unlock()
+            do {
+                let (bytes, response) = try await session.bytes(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    throw URLError(.badServerResponse)
                 }
-                onFrame?(completed)
-            }
-            return
-        }
-        if line.hasPrefix(":") { return } // comment / keepalive
+                guard (200...299).contains(http.statusCode) else {
+                    let error = StreamHTTPError(statusCode: http.statusCode)
+                    emitError(error.localizedDescription, generation: generation)
+                    if [401, 403, 404].contains(http.statusCode) { break }
+                    throw error
+                }
+                guard let contentType = http.value(forHTTPHeaderField: "Content-Type"),
+                      contentType.lowercased().contains("text/event-stream") else {
+                    throw StreamHTTPError(statusCode: http.statusCode, detail: "invalid SSE Content-Type")
+                }
 
-        if let colon = line.firstIndex(of: ":") {
-            let field = String(line[line.startIndex..<colon])
-            var value = String(line[line.index(after: colon)...])
-            if value.hasPrefix(" ") { value.removeFirst() } // strip single leading space
-            switch field {
-            case "event": frame.event = value
-            case "data": frame.data += frame.data.isEmpty ? value : "\n\(value)"
-            case "id": frame.id = value
-            default: break
+                openedAt = Date()
+                emitState(.connected, generation: generation)
+                for try await line in bytes.lines {
+                    guard isCurrent(generation) else { break }
+                    let frame = try parser.consume(line)
+                    if let retry = parser.takeRetryMilliseconds() {
+                        setRetryDelay(TimeInterval(retry) / 1000)
+                    }
+                    if let frame {
+                        updateCursor(parser.cursor)
+                        emitFrame(frame, generation: generation)
+                    }
+                }
+                parser.finish()
+                guard isCurrent(generation) else { break }
+                emitError("SSE stream ended", generation: generation)
+            } catch is CancellationError {
+                break
+            } catch {
+                guard isCurrent(generation) else { break }
+                emitError(error.localizedDescription, generation: generation)
             }
+
+            guard isCurrent(generation) else { break }
+            emitState(.disconnected, generation: generation)
+            let connectedLongEnough = openedAt.map { Date().timeIntervalSince($0) >= 60 } ?? false
+            if connectedLongEnough { setRetryDelay(1) }
+            let delay = nextDelay()
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch {
+                break
+            }
+        }
+
+        lock.lock()
+        if self.generation == generation { runTask = nil }
+        lock.unlock()
+        emitState(.disconnected, generation: generation)
+    }
+
+    private func setRetryDelay(_ value: TimeInterval) {
+        lock.lock(); retryDelay = min(30, max(0.25, value)); lock.unlock()
+    }
+
+    private func nextDelay() -> TimeInterval {
+        lock.lock()
+        let base = min(30, max(0.25, retryDelay))
+        retryDelay = min(30, base * 2)
+        lock.unlock()
+        return base * Double.random(in: 0.75...1.25)
+    }
+
+    private func emitState(_ state: State, generation: Int?) {
+        if let generation, !isCurrent(generation) { return }
+        Task { @MainActor [weak self] in
+            self?.onStateChange?(state)
         }
     }
 
-    private func setState(_ state: State) {
-        onStateChange?(state)
+    private func emitFrame(_ frame: SSEFrame, generation: Int) {
+        guard isCurrent(generation) else { return }
+        Task { @MainActor [weak self] in
+            guard let self, self.isCurrent(generation) else { return }
+            self.onFrame?(frame)
+        }
+    }
+
+    private func emitError(_ message: String, generation: Int) {
+        guard isCurrent(generation) else { return }
+        Task { @MainActor [weak self] in
+            guard let self, self.isCurrent(generation) else { return }
+            self.onError?(message)
+        }
+    }
+}
+
+private struct StreamHTTPError: LocalizedError {
+    let statusCode: Int
+    var detail: String?
+
+    init(statusCode: Int, detail: String? = nil) {
+        self.statusCode = statusCode
+        self.detail = detail
+    }
+
+    var errorDescription: String? {
+        detail ?? "SSE HTTP error \(statusCode)"
     }
 }

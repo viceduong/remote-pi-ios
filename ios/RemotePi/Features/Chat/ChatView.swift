@@ -56,6 +56,7 @@ struct ChatView: View {
     @State private var liveNow = false
     @State private var livePid: Int?
     @Environment(\.presentationMode) private var presentationMode
+    @Environment(\.scenePhase) private var scenePhase
     /// Focus mode (default ON): hides tool output, calls, notes AND thinking.
     @AppStorage("hideToolsEnabled") private var hideTools = true
 
@@ -194,6 +195,7 @@ struct ChatView: View {
                 .onPreferenceChange(BottomMarkerKey.self) { markerY in
                     let distance = markerY - geo.size.height
                     nearBottom = distance <= 200
+                    viewModel.setViewportNearBottom(nearBottom)
                     let showBtn = distance > 200
                     if showBtn != showScrollToBottom { showScrollToBottom = showBtn }
                 }
@@ -208,6 +210,15 @@ struct ChatView: View {
                     } else if Date().timeIntervalSince(lastAutoScroll) > 0.25 {
                         lastAutoScroll = Date()
                         scrollToBottom(proxy, animated: false)
+                    }
+                }
+                .onChange(of: viewModel.prependAnchor) { anchor in
+                    guard let anchor else { return }
+                    // The stable old-first-row ID remains in the list after a
+                    // prepend. Scroll to it after layout, preserving viewport.
+                    DispatchQueue.main.async {
+                        proxy.scrollTo(anchor, anchor: .top)
+                        viewModel.consumePrependAnchor()
                     }
                 }
             }
@@ -299,6 +310,16 @@ struct ChatView: View {
                     livePid = summary.livePid
                 }
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+        }
+        .onChange(of: scenePhase) { phase in
+            switch phase {
+            case .active:
+                viewModel.resumeNetwork()
+            case .inactive, .background:
+                viewModel.suspendNetwork()
+            @unknown default:
+                break
             }
         }
         .onDisappear { viewModel.stop() }
@@ -517,6 +538,13 @@ struct MessageBubble: View {
                         .font(.system(size: scaled(17)))
                         .textSelection(.enabled)
                         .onAppear { loadParsedText() }
+                        .onChange(of: message.text) { _ in
+                            parsedText = nil
+                            if !isStreaming { loadParsedText() }
+                        }
+                        .onChange(of: isStreaming) { streaming in
+                            if !streaming { parsedText = nil; loadParsedText() }
+                        }
                 }
             } else if isStreaming && message.thinking?.isEmpty != false {
                 StreamingDots()
