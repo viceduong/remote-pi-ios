@@ -110,7 +110,7 @@ struct ChatView: View {
             GeometryReader { geo in
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(spacing: 12) {
+                    LazyVStack(spacing: 8) {
                         if viewModel.messages.isEmpty && viewModel.isLoadingHistory {
                             HStack {
                                 ProgressView()
@@ -158,7 +158,7 @@ struct ChatView: View {
                         }
                     }
                     .padding(.horizontal, 12)
-                    .padding(.vertical, 12)
+                    .padding(.vertical, 8)
                     // Bottom marker + reliable open-at-bottom clamp (extracted
                     // so the type checker isn't overwhelmed).
                     .background(BottomMarkerAndClamp(
