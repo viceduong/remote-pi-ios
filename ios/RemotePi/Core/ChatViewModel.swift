@@ -214,9 +214,17 @@ final class ChatViewModel: ObservableObject {
                 await refreshFromServer()
             }
         } catch {
-            if error is CancellationError {
-                messages.removeAll { $0.id == optimisticId }
+            if error is CancellationError || (error as NSError).code == NSURLErrorCancelled {
+                // Swift Task cancellation (view disappeared, app backgrounded, or
+                // explicit Task.cancel). Don't discard the user's text — keep the
+                // optimistic bubble and treat as offline so it retries on reconnect.
+                // The next poll/SSE reconnect will reconcile via clientMessageId.
                 if !wasStreaming { isStreaming = false; workingText = nil }
+                // Keep optimistic message visible; also queue offline if force not already
+                if offlinePending.count < 100, !offlinePending.contains(where: { $0.id.uuidString == clientMessageId }) {
+                    offlinePending.append(OfflineMessage(text: trimmed, id: UUID(uuidString: clientMessageId) ?? UUID()))
+                    Task { await saveOfflineQueue() }
+                }
                 return
             }
             messages.removeAll { $0.id == optimisticId }
@@ -251,6 +259,7 @@ final class ChatViewModel: ObservableObject {
             isStreaming = false
             workingText = nil
         } catch {
+            if isCancellation(error) { return }
             errorMessage = error.localizedDescription
         }
     }
@@ -271,8 +280,15 @@ final class ChatViewModel: ObservableObject {
             hasMore = page.hasMore
             lowestFetchedTs = page.messages.compactMap { $0.timestamp }.min()
         } catch {
+            if isCancellation(error) { return }
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        let ns = error as NSError
+        return ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled
     }
 
     /// Bound live-tail memory without evicting freshly fetched history. When
@@ -553,6 +569,7 @@ final class ChatViewModel: ObservableObject {
                 offlinePending.removeFirst()
                 if response.queued { await loadQueue() }
             } catch {
+                if isCancellation(error) { break }
                 break // still offline — keep the rest
             }
         }
@@ -571,6 +588,7 @@ final class ChatViewModel: ObservableObject {
             queuedItems.removeAll { $0.id == itemId }
             if queuedItems.isEmpty { queuedNote = nil }
         } catch {
+            if isCancellation(error) { return }
             errorMessage = error.localizedDescription
             await loadQueue()
         }

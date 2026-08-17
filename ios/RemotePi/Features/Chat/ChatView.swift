@@ -779,7 +779,7 @@ struct ComposerView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
 
                 Button {
-                    Task { await viewModel.send(viewModel.pendingText) }
+                    Task.detached { await viewModel.send(viewModel.pendingText) }
                 } label: {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.system(size: 30))
