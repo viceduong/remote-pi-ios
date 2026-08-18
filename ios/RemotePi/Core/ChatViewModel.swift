@@ -275,6 +275,9 @@ final class ChatViewModel: ObservableObject {
             let page = try await client.fetchMessages(sessionId, limit: 100)
             guard lifecycleActive else { return }
             messages = page.messages
+            // History may already contain previously queued prompts — clear stale chips
+            reconcileQueued(page.messages)
+            if queuedItems.isEmpty { queuedNote = nil }
             working = page.working
             applyWorkingIndicator()
             hasMore = page.hasMore
@@ -530,7 +533,12 @@ final class ChatViewModel: ObservableObject {
             queuedItems = items.filter { $0.status != "done" && $0.status != "failed" }
             if !queuedItems.isEmpty {
                 queuedNote = "\(queuedItems.count) message\(queuedItems.count > 1 ? "s" : "") queued — agent is busy"
+            } else {
+                queuedNote = nil
             }
+        } else {
+            // Keep last known queue on fetch failure; don't show stale note if we know it's empty
+            if queuedItems.isEmpty { queuedNote = nil }
         }
     }
 
