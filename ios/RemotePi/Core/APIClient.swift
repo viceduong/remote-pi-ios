@@ -43,12 +43,12 @@ struct APIClient {
         req.timeoutInterval = 30
         req.cachePolicy = .reloadIgnoringLocalCacheData
         req.setValue("application/json", forHTTPHeaderField: "Accept")
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let body {
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = try JSONEncoder().encode(body)
+        }
         if !token.isEmpty {
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
-        if let body {
-            req.httpBody = try JSONEncoder().encode(body)
         }
         return req
     }
