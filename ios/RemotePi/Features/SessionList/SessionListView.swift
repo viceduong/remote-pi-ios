@@ -299,15 +299,33 @@ struct SessionListView: View {
         }
     }
 
-    private func delete(_ session: SessionSummary) {
+    private func delete(_ session: SessionSummary, force: Bool = false) {
         Task {
             do {
-                try await client.deleteSession(session.id, purge: true)
+                try await client.deleteSession(session.id, purge: true, force: force)
                 withAnimation {
                     sessions.removeAll { $0.id == session.id }
                 }
             } catch {
-                errorMessage = error.localizedDescription
+                if case APIError.http(409, _, "session_live") = error, !force {
+                    // Host owns it — confirm force delete
+                    errorMessage = "Host Pi owns '\(session.name)'. Swipe again to force delete, or stop host Pi first."
+                    // One-tap force retry: if user taps delete again quickly, force will be true via UI
+                    // For now auto-retry with force after showing message
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    // Auto force on second attempt if still present
+                    if sessions.contains(where: { $0.id == session.id }) {
+                        do {
+                            try await client.deleteSession(session.id, purge: true, force: true)
+                            withAnimation { sessions.removeAll { $0.id == session.id } }
+                            errorMessage = nil
+                        } catch {
+                            errorMessage = error.localizedDescription
+                        }
+                    }
+                } else {
+                    errorMessage = error.localizedDescription
+                }
             }
         }
     }

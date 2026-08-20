@@ -148,8 +148,10 @@ struct APIClient {
         return wrapper.session
     }
 
-    func deleteSession(_ id: String, purge: Bool = false) async throws {
-        try await delete("/api/sessions/\(id)?purge=\(purge ? "1" : "0")")
+    func deleteSession(_ id: String, purge: Bool = false, force: Bool = false) async throws {
+        var qs = "purge=\(purge ? "1" : "0")"
+        if force { qs += "&force=1" }
+        try await delete("/api/sessions/\(id)?\(qs)")
     }
 
     /// GET /api/sessions/:id/messages — last N messages, paginated with `before`.
