@@ -93,14 +93,20 @@ struct SessionListView: View {
                                     Label("ACTIVE NOW", systemImage: "dot.radiowaves.left.and.right")
                                         .font(.caption2.weight(.bold))
                                         .foregroundColor(.green)
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
+                                        .layoutPriority(2)
                                 } else if session.live == true {
                                     Label("HOST", systemImage: "terminal")
                                         .font(.caption2.weight(.bold))
                                         .foregroundColor(theme.accent)
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
                                 } else {
                                     Text(session.running ? "running" : "stopped")
                                         .font(.caption2)
                                         .foregroundColor(session.running ? .green : .secondary)
+                                        .lineLimit(1)
                                     if session.active == true {
                                         Text("· recent")
                                             .font(.caption2)
@@ -110,9 +116,12 @@ struct SessionListView: View {
                                 if let model = session.model {
                                     Text("· \(model)")
                                         .lineLimit(1)
+                                        .truncationMode(.tail)
                                 }
                                 Text("· \(session.messageCount) msgs")
+                                    .lineLimit(1)
                                 Text("· \(Self.relativeTime(session.lastMessageAt ?? session.lastActivityAt))")
+                                    .lineLimit(1)
                             }
                             .font(.caption2)
                             .foregroundColor(.secondary)
