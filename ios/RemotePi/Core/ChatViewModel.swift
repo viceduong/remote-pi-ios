@@ -433,10 +433,10 @@ final class ChatViewModel: ObservableObject {
                 if (msg["role"] as? String) == "user" { break }
                 // Gap-guard: replayed/stale message_start while idle would open
                 // a duplicate bubble for an already-finalized message.
-                if !isStreaming && streamingIndex == nil && Self.isDuplicate(ChatMessage.fromAgentMessage(msg), in: messages) { break }
+                if !isStreaming && streamingIndex == nil && isDuplicate(ChatMessage.fromAgentMessage(msg)) { break }
                 // Gap-guard: replayed/stale message_start while idle must not
                 // open a duplicate bubble for an already-rendered message.
-                if !isStreaming && streamingIndex == nil && Self.isDuplicate(ChatMessage.fromAgentMessage(msg), in: messages) { break }
+                if !isStreaming && streamingIndex == nil && isDuplicate(ChatMessage.fromAgentMessage(msg)) { break }
                 if Self.isToolMessage(msg) { upsertTool(from: msg, finalize: false) }
                 else { upsertAssistant(from: msg, finalize: false) }
             }
