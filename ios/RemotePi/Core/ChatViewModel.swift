@@ -431,10 +431,7 @@ final class ChatViewModel: ObservableObject {
             if let msg = obj["message"] as? [String: Any] {
                 // User prompts are already shown optimistically — skip echoes.
                 if (msg["role"] as? String) == "user" { break }
-                // Gap-guard: replayed/stale message_start while idle would open
-                // a duplicate bubble for an already-finalized message.
-                if !isStreaming && streamingIndex == nil && isDuplicate(ChatMessage.fromAgentMessage(msg)) { break }
-                // Gap-guard: replayed/stale message_start while idle must not
+                // Gap-guard: replayed/stale message events while idle must not
                 // open a duplicate bubble for an already-rendered message.
                 if !isStreaming && streamingIndex == nil && isDuplicate(ChatMessage.fromAgentMessage(msg)) { break }
                 if Self.isToolMessage(msg) { upsertTool(from: msg, finalize: false) }
