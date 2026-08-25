@@ -431,6 +431,12 @@ final class ChatViewModel: ObservableObject {
             if let msg = obj["message"] as? [String: Any] {
                 // User prompts are already shown optimistically — skip echoes.
                 if (msg["role"] as? String) == "user" { break }
+                // Gap-guard: replayed/stale message_start while idle would open
+                // a duplicate bubble for an already-finalized message.
+                if !isStreaming && streamingIndex == nil && Self.isDuplicate(ChatMessage.fromAgentMessage(msg), in: messages) { break }
+                // Gap-guard: replayed/stale message_start while idle must not
+                // open a duplicate bubble for an already-rendered message.
+                if !isStreaming && streamingIndex == nil && Self.isDuplicate(ChatMessage.fromAgentMessage(msg), in: messages) { break }
                 if Self.isToolMessage(msg) { upsertTool(from: msg, finalize: false) }
                 else { upsertAssistant(from: msg, finalize: false) }
             }
@@ -618,6 +624,11 @@ final class ChatViewModel: ObservableObject {
 
     /// Streamed deltas update the in-progress assistant (or tool) bubble.
     private func handleUpdate(_ obj: [String: Any]) {
+        // Gap-guard: straggler/replayed deltas arriving after finalize used to
+        // spawn an orphan assistant bubble via ensureStreamingBubble() — visually
+        // a floating fragment / blank gap inside the response. When no turn is
+        // active and nothing is streaming, an update can only be stale.
+        guard isStreaming || streamingIndex != nil else { return }
         guard let ev = obj["assistantMessageEvent"] as? [String: Any] else { return }
         let type = ev["type"] as? String ?? ""
         if type == "thinking_delta" {
