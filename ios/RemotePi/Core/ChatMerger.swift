@@ -43,6 +43,28 @@ enum ChatMerger {
                 existing[existingIdx] = replacement
                 continue
             }
+            // Upgrade rule: the delivered server echo of an optimistic
+            // bubble. The optimistic copy carries clientMessageId but no
+            // entryId; the server echo carries entryId but no
+            // clientMessageId (the bridge does not persist it into the
+            // message). Match by role + text-head + close timestamp and
+            // REPLACE the optimistic bubble in place — otherwise the echo
+            // is dropped as a 'duplicate' (text-head+ts rule below) and the
+            // message vanishes on the next server-page refresh.
+            if let mts = m.timestamp {
+                if let optIdx = existing.firstIndex(where: { other in
+                    other.role == m.role
+                        && other.clientMessageId != nil
+                        && other.entryId == nil
+                        && other.text.prefix(80) == m.text.prefix(80)
+                        && (other.timestamp.map { abs($0 - mts) < 3000 } ?? false)
+                }) {
+                    var replacement = m
+                    replacement.id = existing[optIdx].id
+                    existing[optIdx] = replacement
+                    continue
+                }
+            }
             if let lastIdx = existing.indices.last {
                 let last = existing[lastIdx]
                 // Continuation only for entry-less streaming fragments; distinct
