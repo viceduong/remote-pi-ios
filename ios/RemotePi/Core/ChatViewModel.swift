@@ -19,6 +19,10 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var messages: [ChatMessage] = []
     @Published private(set) var isStreaming = false
     @Published private(set) var connectionState: ConnectionState = .disconnected
+    /// True while a turn/submission request is in flight. This is the ONLY
+    /// capability that gates sending — transport and agent-busy states are
+    /// scheduling/notification concerns, not submission blockers.
+    @Published private(set) var isSubmitting = false
     @Published private(set) var hasMore = false
     /// Server-owned queued prompts (durable outbox — rendered as pending
     /// bubbles with cancel; never vanish, survive navigation/restart).
@@ -183,9 +187,18 @@ final class ChatViewModel: ObservableObject {
     func send(_ text: String, force: Bool = false) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        guard !isSubmitting else { return } // idempotent; clientMessageId dedupes server-side
+        isSubmitting = true
+        defer { isSubmitting = false }
         pendingText = ""
         let clientMessageId = UUID().uuidString
-        let optimisticId = appendUserMessage(trimmed, clientMessageId: clientMessageId)
+        // Retry/force paths must not stack a second optimistic bubble for the
+        // same text while the first is still pending — it would later collide
+        // with the delivered message and read as a duplicate send.
+        let existingOptimisticId = messages.last(where: {
+            $0.role == .user && $0.text == trimmed && $0.clientMessageId != nil
+        })?.id
+        let optimisticId = existingOptimisticId ?? appendUserMessage(trimmed, clientMessageId: clientMessageId)
         let wasStreaming = isStreaming
         // Immediate feedback: the response can take a second to start, and the
         // first SSE event may lag — show a waiting state right away.
@@ -272,7 +285,12 @@ final class ChatViewModel: ObservableObject {
         do {
             let page = try await client.fetchMessages(sessionId, limit: 100)
             guard lifecycleActive else { return }
-            messages = page.messages
+            // Never blind-replace with an empty/partial page: a transient server
+            // read (file mid-write, restart) would wipe the transcript and show
+            // a blank chat. Keep existing rows; fold the page in incrementally.
+            if !page.messages.isEmpty || messages.isEmpty {
+                messages = page.messages
+            }
             // History may already contain previously queued prompts — clear stale chips
             reconcileQueued(page.messages)
             if queuedItems.isEmpty { queuedNote = nil }
@@ -445,8 +463,10 @@ final class ChatViewModel: ObservableObject {
                 else { upsertAssistant(from: msg, finalize: true) }
             }
         case "agent_exited":
+            // Agent-process lifecycle ≠ transport lifecycle: the server respawns
+            // the agent, while the SSE channel stays up. Mutating transport
+            // state here would spuriously gate submission on agent events.
             isStreaming = false
-            connectionState = .disconnected
         case "queue_update":
             if let items = obj["items"] as? [[String: Any]] {
                 let parsed = items.compactMap { d -> QueueItem? in
@@ -518,13 +538,20 @@ final class ChatViewModel: ObservableObject {
 
     /// Remove queued chips once their prompt actually streams in as a message.
     private func reconcileQueued(_ newMessages: [ChatMessage]) {
+        // Only fold a chip away once the server has actually DISPATCHED it
+        // (status running/done). Removing on text match alone while the item
+        // is still 'queued' races the optimistic bubble and drops the chip
+        // before delivery — the queued message then looks lost.
         guard !queuedItems.isEmpty else { return }
+        var changed = false
         for m in newMessages where m.role == .user {
-            if let idx = queuedItems.firstIndex(where: { $0.message == m.text }) {
-                queuedItems.remove(at: idx)
-            }
-            if queuedItems.isEmpty { queuedNote = nil }
+            guard let idx = queuedItems.firstIndex(where: {
+                $0.message == m.text && ($0.status == "running" || $0.status == "done" || $0.status == "failed")
+            }) else { continue }
+            queuedItems.remove(at: idx)
+            changed = true
         }
+        if changed && queuedItems.isEmpty { queuedNote = nil }
     }
 
     /// Server truth from /queue (durable outbox) — fetch on open so queued

@@ -210,11 +210,14 @@ struct ChatView: View {
                 // by being near the bottom and the user not scrolling. The
                 // one-shot didInitialScroll lands the first page at the bottom.
                 .onChange(of: viewModel.messages.count) { _ in
-                    guard nearBottom, !isUserScrolling else { return }
+                    // One-shot initial scroll lands the session at the bottom on
+                    // open — deliberately NOT gated on nearBottom: the view
+                    // starts at the top, so the bottom-marker gate would be
+                    // false and the chat would open scrolled to the top.
                     if !didInitialScroll {
                         didInitialScroll = true
                         scrollToBottom(proxy, animated: false)
-                    } else if Date().timeIntervalSince(lastAutoScroll) > 0.25 {
+                    } else if nearBottom, !isUserScrolling, Date().timeIntervalSince(lastAutoScroll) > 0.25 {
                         lastAutoScroll = Date()
                         scrollToBottom(proxy, animated: false)
                     }
@@ -785,8 +788,11 @@ struct ComposerView: View {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.system(size: 30))
                 }
+                // Submit capability: text present and no request in flight.
+                // Transport (SSE) and agent-busy are NOT submission blockers —
+                // they select delivery paths (offline queue / durable queue).
                 .disabled(viewModel.pendingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                          || viewModel.connectionState == .disconnected)
+                          || viewModel.isSubmitting)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
