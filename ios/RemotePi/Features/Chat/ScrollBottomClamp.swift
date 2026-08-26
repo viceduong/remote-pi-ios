@@ -24,7 +24,7 @@ struct ScrollBottomClamp: UIViewRepresentable {
         let coordinator = context.coordinator
         DispatchQueue.main.async {
             guard let scrollView = coordinator.findScrollView() else { return }
-            func clamp() {
+            func clamp() -> Bool {
                 guard scrollView.contentSize.height > scrollView.bounds.height else { return false }
                 scrollView.setContentOffset(
                     CGPoint(x: 0, y: CGFloat.greatestFiniteMagnitude), animated: false)
