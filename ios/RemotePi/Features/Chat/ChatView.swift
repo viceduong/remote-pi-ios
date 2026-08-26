@@ -101,7 +101,6 @@ struct ChatView: View {
     private var bottomMarker: some View {
         BottomMarkerAndClamp(
             clampTrigger: !didClampInitial && !viewModel.messages.isEmpty,
-            follow: nearBottom,
             onClamped: { didClampInitial = true }
         )
     }
