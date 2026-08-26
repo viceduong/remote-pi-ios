@@ -378,6 +378,7 @@ struct ChatView: View {
                     presentationMode.wrappedValue.dismiss()
                 }
             } catch {
+                if error is CancellationError { return }
                 viewModel.errorMessage = error.localizedDescription
             }
         }

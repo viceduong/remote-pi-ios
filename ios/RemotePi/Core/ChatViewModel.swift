@@ -214,13 +214,11 @@ final class ChatViewModel: ObservableObject {
                 await refreshFromServer()
             }
         } catch {
-            if error is CancellationError || (error as NSError).code == NSURLErrorCancelled {
+            if isCancellation(error) {
                 // Swift Task cancellation (view disappeared, app backgrounded, or
-                // explicit Task.cancel). Don't discard the user's text — keep the
-                // optimistic bubble and treat as offline so it retries on reconnect.
-                // The next poll/SSE reconnect will reconcile via clientMessageId.
+                // explicit Task.cancel) — wrapped or not. Don't discard the
+                // user's text: keep the optimistic bubble and retry on reconnect.
                 if !wasStreaming { isStreaming = false; workingText = nil }
-                // Keep optimistic message visible; also queue offline if force not already
                 if offlinePending.count < 100, !offlinePending.contains(where: { $0.id.uuidString == clientMessageId }) {
                     offlinePending.append(OfflineMessage(text: trimmed, id: UUID(uuidString: clientMessageId) ?? UUID()))
                     Task { await saveOfflineQueue() }

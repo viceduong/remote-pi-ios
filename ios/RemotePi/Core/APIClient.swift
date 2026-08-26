@@ -102,6 +102,13 @@ struct APIClient {
             }.value
             return result
         } catch {
+            // Real cancellations must propagate as-is: wrapping them here
+            // turns CancellationError into APIError.decoding, which defeats
+            // every upstream `isCancellation` filter and surfaces the raw
+            // "Swift.CancellationError" text to the user after submit.
+            if error is CancellationError || (error as NSError).code == NSURLErrorCancelled {
+                throw error
+            }
             // Surface what actually came back so misconfigured URLs are obvious
             // (e.g. hitting a router page on port 80 because :8787 was omitted).
             let preview = String(data: data.prefix(160), encoding: .utf8) ?? "<binary>"
