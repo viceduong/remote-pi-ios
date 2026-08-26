@@ -50,6 +50,12 @@ struct ScrollBottomClamp: UIViewRepresentable {
         weak var view: UIView?
         var didClamp = false
 
+        // Late-growth pin: async images and streamed rows change contentSize
+        // AFTER the open clamp latched. SwiftUI updates don't fire for those,
+        // so pinIfAtBottom() alone misses them. This observer re-clamps at
+        // the UIKit level, but ONLY while the user is at the bottom.
+        private var growthObserver: NSKeyValueObservation?
+
         func findScrollView() -> UIScrollView? {
             var s: UIView? = view?.superview
             while let v = s {
@@ -82,6 +88,7 @@ struct ScrollBottomClamp: UIViewRepresentable {
                 // still empty/loading, stay armed for the next view update.
                 if (sv?.contentSize.height ?? 0) > (sv?.bounds.height ?? 0) {
                     self.didClamp = true
+                    self.installGrowthPin()
                     onComplete()
                 } else if grew {
                     // Content is growing but still short — retry once more.
@@ -90,6 +97,7 @@ struct ScrollBottomClamp: UIViewRepresentable {
                         self.clamp()
                         if (self.findScrollView()?.contentSize.height ?? 0) > (self.findScrollView()?.bounds.height ?? 0) {
                             self.didClamp = true
+                            self.installGrowthPin()
                             onComplete()
                         }
                     }
@@ -98,6 +106,23 @@ struct ScrollBottomClamp: UIViewRepresentable {
         }
 
         private var lastSettledHeight: CGFloat = 0
+
+        /// Observe contentSize growth after the open clamp latched. Async
+        /// images and streamed rows grow the stack without any SwiftUI update,
+        /// so pin here at the UIKit level — but only when the user is at the
+        /// bottom (within threshold of max offset). Scrolling up disables the
+        /// pin automatically; scrolling back near the bottom re-arms it.
+        func installGrowthPin() {
+            guard growthObserver == nil, let scrollView = findScrollView() else { return }
+            growthObserver = scrollView.observe(\.contentSize, options: [.new]) { [weak self] sv, _ in
+                guard let self, self.didClamp else { return }
+                let maxOffset = sv.contentSize.height - sv.bounds.height
+                guard maxOffset > 0 else { return }
+                guard sv.contentOffset.y >= maxOffset - 80 else { return }
+                sv.setContentOffset(
+                    CGPoint(x: 0, y: CGFloat.greatestFiniteMagnitude), animated: false)
+            }
+        }
 
         func pinIfAtBottom() {
             guard let scrollView = findScrollView() else { return }

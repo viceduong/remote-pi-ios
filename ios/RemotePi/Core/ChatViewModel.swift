@@ -258,6 +258,16 @@ final class ChatViewModel: ObservableObject {
                     return
                 }
                 errorMessage = "Host Pi owns this session — stop it in the terminal before sending here."
+            } else if isCancellation(error) {
+                // Task cancelled mid-submit (backgrounded / view restarted).
+                // Same contract as the early cancellation path: keep the
+                // optimistic bubble and queue for reconnect flush.
+                if offlinePending.count < 100,
+                   !offlinePending.contains(where: { $0.id.uuidString == clientMessageId }) {
+                    offlinePending.append(OfflineMessage(text: trimmed, id: UUID(uuidString: clientMessageId) ?? UUID()))
+                    Task { await saveOfflineQueue() }
+                }
+                return
             } else {
                 errorMessage = error.localizedDescription
             }
