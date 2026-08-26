@@ -50,12 +50,6 @@ struct ScrollBottomClamp: UIViewRepresentable {
         weak var view: UIView?
         var didClamp = false
 
-        // Late-growth pin: async images and streamed rows change contentSize
-        // AFTER the open clamp latched. SwiftUI updates don't fire for those,
-        // so pinIfAtBottom() alone misses them. This observer re-clamps at
-        // the UIKit level, but ONLY while the user is at the bottom.
-        private var growthObserver: NSKeyValueObservation?
-
         func findScrollView() -> UIScrollView? {
             var s: UIView? = view?.superview
             while let v = s {
@@ -88,7 +82,6 @@ struct ScrollBottomClamp: UIViewRepresentable {
                 // still empty/loading, stay armed for the next view update.
                 if (sv?.contentSize.height ?? 0) > (sv?.bounds.height ?? 0) {
                     self.didClamp = true
-                    self.installGrowthPin()
                     onComplete()
                 } else if grew {
                     // Content is growing but still short — retry once more.
@@ -97,7 +90,6 @@ struct ScrollBottomClamp: UIViewRepresentable {
                         self.clamp()
                         if (self.findScrollView()?.contentSize.height ?? 0) > (self.findScrollView()?.bounds.height ?? 0) {
                             self.didClamp = true
-                            self.installGrowthPin()
                             onComplete()
                         }
                     }
@@ -106,44 +98,6 @@ struct ScrollBottomClamp: UIViewRepresentable {
         }
 
         private var lastSettledHeight: CGFloat = 0
-
-        /// Observe contentSize growth after the open clamp latched. Async
-        /// images and streamed rows grow the stack without any SwiftUI
-        /// update, so this pins at the UIKit level.
-        ///
-        /// The condition is WAS-pinned, not IS-near-bottom: growth ABOVE the
-        /// viewport (an image loading in an older message) increases the
-        /// distance to the bottom, so an is-near-bottom check disables the
-        /// pin exactly when it is needed. Instead: if the user was pinned at
-        /// the bottom BEFORE this growth (offset within 60pt of the previous
-        /// max), follow to the NEW bottom regardless of where the growth
-        /// happened. Otherwise (user reading history) leave the viewport
-        /// untouched. The clamp is deferred out of the layout pass to avoid
-        /// re-entrant layout storms.
-        func installGrowthPin() {
-            guard growthObserver == nil, let scrollView = findScrollView() else { return }
-            growthObserver = scrollView.observe(\.contentSize, options: [.old, .new]) { [weak self] sv, change in
-                guard let self, self.didClamp else { return }
-                let newHeight = sv.contentSize.height
-                let oldHeight = change.oldValue?.height ?? newHeight
-                let delta = newHeight - oldHeight
-                guard delta > 0.5 else { return }
-                let boundsHeight = sv.bounds.height
-                let previousMax = oldHeight - boundsHeight
-                let wasAtBottom = previousMax <= 0 || sv.contentOffset.y >= previousMax - 60
-                guard wasAtBottom, !self.pendingClamp else { return }
-                self.pendingClamp = true
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    defer { self.pendingClamp = false }
-                    guard let scrollView = self.findScrollView() else { return }
-                    scrollView.setContentOffset(
-                        CGPoint(x: 0, y: CGFloat.greatestFiniteMagnitude), animated: false)
-                }
-            }
-        }
-
-        private var pendingClamp = false
 
         func pinIfAtBottom() {
             guard let scrollView = findScrollView() else { return }
