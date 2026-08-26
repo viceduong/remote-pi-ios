@@ -93,6 +93,18 @@ struct ChatView: View {
         _livePid = State(initialValue: session.livePid)
         _viewModel = StateObject(wrappedValue: ChatViewModel(client: client, sessionId: session.id))
     }
+    /// Bottom marker + reliable open-at-bottom clamp. Extracted into its own
+    /// ViewBuilder so the body expression stays type-checkable (Swift's
+    /// compiler times out on very deep modifier chains).
+    @ViewBuilder
+    private var bottomMarker: some View {
+        BottomMarkerAndClamp(
+            clampTrigger: !didClampInitial && !viewModel.messages.isEmpty,
+            follow: nearBottom,
+            onClamped: { didClampInitial = true }
+        )
+    }
+
 
     var body: some View {
         VStack(spacing: 0) {
@@ -159,13 +171,7 @@ struct ChatView: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 12)
-                    // Bottom marker + reliable open-at-bottom clamp (extracted
-                    // so the type checker isn't overwhelmed).
-                    .background(BottomMarkerAndClamp(
-                        clampTrigger: !didClampInitial && !viewModel.messages.isEmpty,
-                        follow: nearBottom,
-                        onClamped: { didClampInitial = true }
-                    ))
+                    .background(bottomMarker)
 
                     // Gesture-aware follow: never jump while the user drags.
                     Color.clear.frame(height: 1)
