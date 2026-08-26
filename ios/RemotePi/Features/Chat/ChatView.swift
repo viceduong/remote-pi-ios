@@ -163,6 +163,7 @@ struct ChatView: View {
                     // so the type checker isn't overwhelmed).
                     .background(BottomMarkerAndClamp(
                         clampTrigger: !didClampInitial && !viewModel.messages.isEmpty,
+                        follow: nearBottom,
                         onClamped: { didClampInitial = true }
                     ))
 

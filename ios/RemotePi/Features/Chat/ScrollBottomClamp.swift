@@ -16,6 +16,11 @@ import UIKit
 /// an attempt cap, and a hard timeout, so it can never loop forever.
 struct ScrollBottomClamp: UIViewRepresentable {
     var trigger: Bool
+    /// When true, keep pinning to the bottom while content grows (async
+    /// images, streamed rows). Parent drives this from its nearBottom state,
+    /// so we only ever move the viewport at the bottom edge — where the user
+    /// is looking — never yanking from mid-scroll.
+    var follow: Bool = false
     var onClamped: () -> Void = {}
 
     func makeUIView(context: Context) -> UIView {
@@ -27,8 +32,16 @@ struct ScrollBottomClamp: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
-        guard trigger, !context.coordinator.didClamp else { return }
-        context.coordinator.startConverging(onComplete: onClamped)
+        let coordinator = context.coordinator
+        if !coordinator.didClamp, trigger {
+            coordinator.startSettle(onComplete: onClamped)
+        } else if coordinator.didClamp, follow {
+            // Pin-to-bottom while the user stays at the bottom: contentSize
+            // changes (image arrivals, appended rows) re-clamp immediately —
+            // content grows AT the viewport, so this is a single smooth
+            // motion, not a jump.
+            coordinator.pinIfAtBottom()
+        }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -36,12 +49,6 @@ struct ScrollBottomClamp: UIViewRepresentable {
     final class Coordinator {
         weak var view: UIView?
         var didClamp = false
-
-        private var observer: NSKeyValueObservation?
-        private var lastHeight: CGFloat = 0
-        private var stableCount = 0
-        private var attempts = 0
-        private var timeoutWork: DispatchWorkItem?
 
         func findScrollView() -> UIScrollView? {
             var s: UIView? = view?.superview
@@ -52,53 +59,54 @@ struct ScrollBottomClamp: UIViewRepresentable {
             return nil
         }
 
-        func startConverging(onComplete: @escaping () -> Void) {
+        private func clamp() {
             guard let scrollView = findScrollView() else { return }
+            guard scrollView.contentSize.height > scrollView.bounds.height else { return }
+            scrollView.setContentOffset(
+                CGPoint(x: 0, y: CGFloat.greatestFiniteMagnitude), animated: false)
+        }
 
-            func clamp() {
-                guard scrollView.contentSize.height > scrollView.bounds.height else { return }
-                scrollView.setContentOffset(
-                    CGPoint(x: 0, y: CGFloat.greatestFiniteMagnitude), animated: false)
-            }
+        /// Initial open: immediate clamp + one settle pass, then latch.
+        /// No observers, no timeouts — nothing to force full-stack
+        /// materialization or race a blank screen.
+        func startSettle(onComplete: @escaping () -> Void) {
+            guard !didClamp else { return }
             clamp()
-
-            // Fallback: if content stops changing before KVO (tiny session),
-            // latch after the cap/timeout so the trigger never stays armed.
-            let timeout = DispatchWorkItem { [weak self] in
-                self?.finish(onComplete: onComplete)
-            }
-            timeoutWork = timeout
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: timeout)
-
-            // Layout-synchronous convergence: contentSize changes during
-            // layout when rows materialize; clamp in that same pass so no
-            // intermediate frame is ever displayed.
-            observer = scrollView.observe(\.contentSize, options: [.new]) { [weak self] sv, _ in
-                guard let self else { return }
-                let h = sv.contentSize.height
-                if abs(h - self.lastHeight) < 1 { self.stableCount += 1 } else { self.stableCount = 0 }
-                self.lastHeight = h
-                self.attempts += 1
-                sv.setContentOffset(CGPoint(x: 0, y: CGFloat.greatestFiniteMagnitude), animated: false)
-                if self.stableCount >= 2 || self.attempts >= 30 {
-                    self.finish(onComplete: onComplete)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                guard let self, !self.didClamp else { return }
+                let sv = self.findScrollView()
+                let grew = (sv?.contentSize.height ?? 0) > (self.lastSettledHeight > 0 ? self.lastSettledHeight : 0)
+                self.clamp()
+                self.lastSettledHeight = sv?.contentSize.height ?? 0
+                // Latch only when content is tall enough to clamp; if it was
+                // still empty/loading, stay armed for the next view update.
+                if (sv?.contentSize.height ?? 0) > (sv?.bounds.height ?? 0) {
+                    self.didClamp = true
+                    onComplete()
+                } else if grew {
+                    // Content is growing but still short — retry once more.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                        guard let self, !self.didClamp else { return }
+                        self.clamp()
+                        if (self.findScrollView()?.contentSize.height ?? 0) > (self.findScrollView()?.bounds.height ?? 0) {
+                            self.didClamp = true
+                            onComplete()
+                        }
+                    }
                 }
             }
         }
 
-        private func finish(onComplete: @escaping () -> Void) {
-            guard !didClamp else { return }
-            didClamp = true
-            timeoutWork?.cancel()
-            timeoutWork = nil
-            observer?.invalidate()
-            observer = nil
-            // One final absolute-bottom clamp now that content is stable.
-            if let scrollView = findScrollView() {
-                scrollView.setContentOffset(
-                    CGPoint(x: 0, y: CGFloat.greatestFiniteMagnitude), animated: false)
-            }
-            onComplete()
+        private var lastSettledHeight: CGFloat = 0
+
+        func pinIfAtBottom() {
+            guard let scrollView = findScrollView() else { return }
+            // Only act when the user is visually at the bottom (offset near
+            // the max) — the parent only calls this while nearBottom anyway,
+            // but double-check to stay safe against stale state.
+            let maxOffset = scrollView.contentSize.height - scrollView.bounds.height
+            guard maxOffset > 0, scrollView.contentOffset.y >= maxOffset - 40 else { return }
+            clamp()
         }
     }
 }
