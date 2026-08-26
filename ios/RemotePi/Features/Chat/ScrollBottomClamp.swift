@@ -21,21 +21,29 @@ struct ScrollBottomClamp: UIViewRepresentable {
 
     func updateUIView(_ uiView: UIView, context: Context) {
         guard trigger, !context.coordinator.didClamp else { return }
-        context.coordinator.didClamp = true
         let coordinator = context.coordinator
         DispatchQueue.main.async {
             guard let scrollView = coordinator.findScrollView() else { return }
             func clamp() {
-                guard scrollView.contentSize.height > scrollView.bounds.height else { return }
+                guard scrollView.contentSize.height > scrollView.bounds.height else { return false }
                 scrollView.setContentOffset(
                     CGPoint(x: 0, y: CGFloat.greatestFiniteMagnitude), animated: false)
+                return true
             }
-            clamp()
-            // Single settle pass for lazy content growth — then stop.
+            let first = clamp()
+            // Settle pass for lazy content growth — then latch.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                clamp()
+                let second = clamp()
+                // Latch ONLY on a successful clamp. If content was still
+                // loading (empty/too short), keep the trigger armed so the
+                // next view update re-runs the clamp — otherwise opening
+                // a session with history would burn the one-shot on an empty
+                // first pass and open at the top.
+                if first || second {
+                    coordinator.didClamp = true
+                    onClamped()
+                }
             }
-            onClamped()
         }
     }
 
