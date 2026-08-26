@@ -108,21 +108,42 @@ struct ScrollBottomClamp: UIViewRepresentable {
         private var lastSettledHeight: CGFloat = 0
 
         /// Observe contentSize growth after the open clamp latched. Async
-        /// images and streamed rows grow the stack without any SwiftUI update,
-        /// so pin here at the UIKit level — but only when the user is at the
-        /// bottom (within threshold of max offset). Scrolling up disables the
-        /// pin automatically; scrolling back near the bottom re-arms it.
+        /// images and streamed rows grow the stack without any SwiftUI
+        /// update, so this pins at the UIKit level.
+        ///
+        /// The condition is WAS-pinned, not IS-near-bottom: growth ABOVE the
+        /// viewport (an image loading in an older message) increases the
+        /// distance to the bottom, so an is-near-bottom check disables the
+        /// pin exactly when it is needed. Instead: if the user was pinned at
+        /// the bottom BEFORE this growth (offset within 60pt of the previous
+        /// max), follow to the NEW bottom regardless of where the growth
+        /// happened. Otherwise (user reading history) leave the viewport
+        /// untouched. The clamp is deferred out of the layout pass to avoid
+        /// re-entrant layout storms.
         func installGrowthPin() {
             guard growthObserver == nil, let scrollView = findScrollView() else { return }
-            growthObserver = scrollView.observe(\.contentSize, options: [.new]) { [weak self] sv, _ in
+            growthObserver = scrollView.observe(\.contentSize, options: [.old, .new]) { [weak self] sv, change in
                 guard let self, self.didClamp else { return }
-                let maxOffset = sv.contentSize.height - sv.bounds.height
-                guard maxOffset > 0 else { return }
-                guard sv.contentOffset.y >= maxOffset - 80 else { return }
-                sv.setContentOffset(
-                    CGPoint(x: 0, y: CGFloat.greatestFiniteMagnitude), animated: false)
+                let newHeight = sv.contentSize.height
+                let oldHeight = change.oldValue?.height ?? newHeight
+                let delta = newHeight - oldHeight
+                guard delta > 0.5 else { return }
+                let boundsHeight = sv.bounds.height
+                let previousMax = oldHeight - boundsHeight
+                let wasAtBottom = previousMax <= 0 || sv.contentOffset.y >= previousMax - 60
+                guard wasAtBottom, !self.pendingClamp else { return }
+                self.pendingClamp = true
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    defer { self.pendingClamp = false }
+                    guard let scrollView = self.findScrollView() else { return }
+                    scrollView.setContentOffset(
+                        CGPoint(x: 0, y: CGFloat.greatestFiniteMagnitude), animated: false)
+                }
             }
         }
+
+        private var pendingClamp = false
 
         func pinIfAtBottom() {
             guard let scrollView = findScrollView() else { return }
