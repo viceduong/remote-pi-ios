@@ -24,26 +24,35 @@ struct ScrollBottomClamp: UIViewRepresentable {
         let coordinator = context.coordinator
         DispatchQueue.main.async {
             guard let scrollView = coordinator.findScrollView() else { return }
-            func clamp() -> Bool {
-                guard scrollView.contentSize.height > scrollView.bounds.height else { return false }
+            func clamp() {
+                guard scrollView.contentSize.height > scrollView.bounds.height else { return }
                 scrollView.setContentOffset(
                     CGPoint(x: 0, y: CGFloat.greatestFiniteMagnitude), animated: false)
-                return true
             }
-            let first = clamp()
-            // Settle pass for lazy content growth — then latch.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                let second = clamp()
-                // Latch ONLY on a successful clamp. If content was still
-                // loading (empty/too short), keep the trigger armed so the
-                // next view update re-runs the clamp — otherwise opening
-                // a session with history would burn the one-shot on an empty
-                // first pass and open at the top.
-                if first || second {
+            // Converge to the ABSOLUTE bottom. LazyVStack materializes rows in
+            // batches, each growing contentSize; a single settle pass lands
+            // short on long sessions. Re-clamp while content keeps growing,
+            // bounded by BOTH a stability check and a hard cap (2s) so this
+            // never becomes a convergence loop.
+            var lastHeight: CGFloat = 0
+            var stableCount = 0
+            var attempts = 0
+            func settle() {
+                clamp()
+                let h = scrollView.contentSize.height
+                if abs(h - lastHeight) < 1 { stableCount += 1 } else { stableCount = 0 }
+                lastHeight = h
+                attempts += 1
+                // Stop when the content stops growing twice in a row, or at
+                // the hard cap. Latch the one-shot only then.
+                if stableCount >= 2 || attempts >= 10 {
                     coordinator.didClamp = true
                     onClamped()
+                    return
                 }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { settle() }
             }
+            settle()
         }
     }
 
