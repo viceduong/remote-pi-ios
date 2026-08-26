@@ -14,7 +14,6 @@ private struct BottomMarkerKey: PreferenceKey {
 /// chat layout type-checks quickly.
 private struct BottomMarkerAndClamp: View {
     let clampTrigger: Bool
-    let follow: Bool
     let onClamped: () -> Void
 
     var body: some View {
@@ -25,7 +24,7 @@ private struct BottomMarkerAndClamp: View {
                     value: g.frame(in: .named("chatScroll")).maxY
                 )
             })
-            .background(ScrollBottomClamp(trigger: clampTrigger, follow: follow, onClamped: onClamped))
+            .background(ScrollBottomClamp(trigger: clampTrigger, onClamped: onClamped))
     }
 }
 
