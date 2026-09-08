@@ -55,6 +55,10 @@ struct ChatView: View {
     /// Live-refreshed host-ownership state (banner stays current).
     @State private var liveNow = false
     @State private var livePid: Int?
+    /// Session is interactive only after history loaded AND the initial
+    /// bottom clamp finished — before that the view is dimmed and
+    /// non-interactive to avoid jittery jumps during load.
+    @State private var sessionReady = false
     @Environment(\.presentationMode) private var presentationMode
     @Environment(\.scenePhase) private var scenePhase
     /// Focus mode (default ON): hides tool output, calls, notes AND thinking.
@@ -171,7 +175,14 @@ struct ChatView: View {
                     // so the type checker isn't overwhelmed).
                     .background(BottomMarkerAndClamp(
                         clampTrigger: !didClampInitial && !viewModel.messages.isEmpty,
-                        onClamped: { didClampInitial = true }
+                        onClamped: {
+                            didClampInitial = true
+                            // Ready only after the offset clamp settles —
+                            // undim + enable interaction here.
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                                withAnimation(.easeIn(duration: 0.15)) { sessionReady = true }
+                            }
+                        }
                     ))
 
                     // Gesture-aware follow: never jump while the user drags.
@@ -248,6 +259,27 @@ struct ChatView: View {
                 }
             }
             }
+            // Dim + non-interactive until history is loaded and the initial
+            // bottom clamp settled — prevents jittery jump during load.
+            .overlay(
+                Group {
+                    if !sessionReady {
+                        ZStack {
+                            Rectangle()
+                                .fill(theme.background.opacity(0.55))
+                                .ignoresSafeArea()
+                            VStack(spacing: 8) {
+                                ProgressView()
+                                Text("Loading conversation…")
+                                    .font(.caption)
+                                    .foregroundColor(theme.secondaryText)
+                            }
+                        }
+                        .transition(.opacity)
+                    }
+                }
+            )
+            .disabled(!sessionReady)
 
         }
         // Composer + status bars live in the bottom safe-area inset: iOS 15
