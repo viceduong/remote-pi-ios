@@ -476,6 +476,8 @@ struct MessageBubble: View {
     var onDiagnose: (ChatMessage) -> Void = { _ in }
     var onFork: (ChatMessage) -> Void = { _ in }
     @State private var noteExpanded = false
+    /// Long user inputs (logs/dumps) collapse to a preview; tap to expand.
+    @State private var expanded = false
     @Environment(\.chatTextScale) private var textScale
     @Environment(\.theme) private var theme
     /// Parsed markdown (off-main, cached by text) — avoids first-frame stutter
@@ -593,14 +595,54 @@ struct MessageBubble: View {
     }
 
     private var userBubble: some View {
-        Text(message.text)
-            .font(.system(size: scaled(17)))
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(theme.userBubble)
-            .foregroundColor(.white)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .textSelection(.enabled)
+        // Long inputs (pasted logs, dumps) collapse to a preview with an
+        // expander — a 500-line paste otherwise floods the whole screen.
+        if isLongUserText {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(expanded ? message.text : message.text.prefix(UserTextCollapse.previewChars) + "\n…")
+                    .font(.system(size: scaled(17)))
+                    .lineLimit(expanded ? nil : UserTextCollapse.previewLines)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(theme.userBubble)
+                    .foregroundColor(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .textSelection(.enabled)
+                Button {
+                    withAnimation(.easeOut(duration: 0.2)) { expanded.toggle() }
+                } label: {
+                    let lineCount = message.text.split(separator: "\n", omittingEmptySubsequences: false).count
+                    Label(expanded ? "Show less" : "Show all \(lineCount) lines",
+                          systemImage: expanded ? "chevron.up" : "chevron.down")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.white.opacity(0.85))
+                }
+                .padding(.leading, 6)
+            }
+        } else {
+            Text(message.text)
+                .font(.system(size: scaled(17)))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(theme.userBubble)
+                .foregroundColor(.white)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .textSelection(.enabled)
+        }
+    }
+
+    /// Collapse thresholds for long user inputs (logs, dumps, pastes).
+    private enum UserTextCollapse {
+        static let thresholdChars = 1_200
+        static let thresholdLines = 20
+        static let previewChars = 800
+        static let previewLines = 12
+    }
+
+    private var isLongUserText: Bool {
+        message.role == .user
+            && (message.text.count > UserTextCollapse.thresholdChars
+                || message.text.split(separator: "\n", omittingEmptySubsequences: false).count > UserTextCollapse.thresholdLines)
     }
 
     private var assistantBubble: some View {
