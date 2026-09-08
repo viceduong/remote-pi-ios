@@ -177,11 +177,10 @@ struct ChatView: View {
                         clampTrigger: !didClampInitial && !viewModel.messages.isEmpty,
                         onClamped: {
                             didClampInitial = true
-                            // Ready only after the offset clamp settles —
-                            // undim + enable interaction here.
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                                withAnimation(.easeIn(duration: 0.15)) { sessionReady = true }
-                            }
+                            // ScrollBottomClamp signals only after the scroll
+                            // view is genuinely at the bottom (lazy growth
+                            // settled) — undim + enable interaction here.
+                            withAnimation(.easeIn(duration: 0.15)) { sessionReady = true }
                         }
                     ))
 

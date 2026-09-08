@@ -31,11 +31,26 @@ struct ScrollBottomClamp: UIViewRepresentable {
                     CGPoint(x: 0, y: CGFloat.greatestFiniteMagnitude), animated: false)
             }
             clamp()
-            // Single settle pass for lazy content growth — then stop.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                clamp()
+            // Settle passes for lazy content growth — keep re-clamping until
+            // the scroll view is genuinely at the bottom, then signal ready.
+            // (A fixed 150ms was too early: content kept growing and the user
+            // saw the view still scrolling after the dim lifted.)
+            func settled() -> Bool {
+                let bottom = scrollView.contentSize.height - scrollView.bounds.height
+                    + scrollView.adjustedContentInset.bottom
+                return abs(scrollView.contentOffset.y - max(0, bottom)) < 1
             }
-            onClamped()
+            var attempts = 0
+            func settle() {
+                clamp()
+                attempts += 1
+                if settled() || attempts >= 12 {
+                    onClamped()
+                    return
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { settle() }
+            }
+            settle()
         }
     }
 
