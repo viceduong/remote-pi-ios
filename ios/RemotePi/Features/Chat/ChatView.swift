@@ -79,10 +79,13 @@ struct ChatView: View {
         }
         return base.filter { msg in
             if msg.role == .tool { return true } // tool header still useful even if text collapsed
-            // Assistant tool-call-only bubbles render nothing in focus mode
-            // (chips hidden) — they appear as blank gaps between tool outputs.
-            if hideTools && msg.role == .assistant && msg.isBlankForDisplay && !msg.toolCalls.isEmpty {
-                return false
+            // Focus mode hides tool-call chips, so an assistant message whose
+            // only content is tool calls (or nothing at all) renders as an
+            // empty gap. Drop it — its tool output bubble still shows.
+            if hideTools && msg.role == .assistant {
+                let textEmpty = msg.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                let thinkEmpty = msg.thinking?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
+                if textEmpty && thinkEmpty { return false }
             }
             return !msg.isBlankForDisplay
         }
