@@ -781,11 +781,14 @@ struct MessageBubble: View {
             parsedText = AttributedString(cached)
             return
         }
-        Self.parseGate.enqueue { [weak self] in
+        // MessageBubble is a struct — capture the @State box identity-safe via
+        // the setter only. If the bubble is gone by completion, the write is
+        // simply dropped (no leak, no crash).
+        Self.parseGate.enqueue {
             let parsed = MessageBubble.parseMarkdown(text)
             let boxed = NSAttributedString(attributedString: parsed)
             Self.markdownCache.setObject(boxed, forKey: text as NSString)
-            await MainActor.run { self?.parsedText = AttributedString(boxed) }
+            await MainActor.run { parsedText = AttributedString(boxed) }
         }
     }
 
