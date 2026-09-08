@@ -247,6 +247,8 @@ final class ChatViewModel: ObservableObject {
                     return
                 }
                 errorMessage = "Host Pi owns this session — stop it in the terminal before sending here."
+            } else if isCancellation(error) {
+                // View disappeared / app backgrounded mid-request — not an error.
             } else {
                 errorMessage = error.localizedDescription
             }

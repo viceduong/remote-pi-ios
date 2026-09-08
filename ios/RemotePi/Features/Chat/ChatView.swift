@@ -428,6 +428,8 @@ struct ChatView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                     presentationMode.wrappedValue.dismiss()
                 }
+            } catch is CancellationError {
+                // Fork abandoned (nav away) — not an error.
             } catch {
                 viewModel.errorMessage = error.localizedDescription
             }

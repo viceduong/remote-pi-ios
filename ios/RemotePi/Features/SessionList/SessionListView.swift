@@ -242,6 +242,8 @@ struct SessionListView: View {
             serverInfo = info
             sessions = page.sessions
             hasMore = page.hasMore
+        } catch is CancellationError {
+            // View refreshed away — not an error.
         } catch {
             guard generation == loadGeneration else { return }
             serverInfo = nil
@@ -302,6 +304,8 @@ struct SessionListView: View {
                 let session = try await client.createSession(name: name)
                 sessions.insert(session, at: 0)
                 openSession = session
+            } catch is CancellationError {
+                // Create abandoned — not an error.
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -328,15 +332,23 @@ struct SessionListView: View {
                             try await client.deleteSession(session.id, purge: true, force: true)
                             withAnimation { sessions.removeAll { $0.id == session.id } }
                             errorMessage = nil
+                        } catch is CancellationError {
+                            // Delete abandoned — not an error.
                         } catch {
                             errorMessage = error.localizedDescription
                         }
                     }
+                } else if isCancellation(error) {
+                    // Delete abandoned — not an error.
                 } else {
                     errorMessage = error.localizedDescription
                 }
             }
         }
+    }
+
+    private func isCancellation(_ error: Error) -> Bool {
+        error is CancellationError
     }
 
     /// "2m ago" for recent, date for old.

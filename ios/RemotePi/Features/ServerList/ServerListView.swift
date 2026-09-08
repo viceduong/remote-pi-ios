@@ -124,6 +124,8 @@ struct ServerListView: View {
                 _ = try await client.fetchServerInfo()
                 store.selectedServer = server
                 showSessionsFor = server
+            } catch is CancellationError {
+                // Navigation cancelled — not an error.
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -217,6 +219,8 @@ struct ServerEditView: View {
                 let info = try await client.fetchServerInfo()
                 valid = true
                 errorMessage = "Connected ✓ pi \(info.piVersion ?? "?")"
+            } catch is CancellationError {
+                valid = false
             } catch {
                 valid = false
                 errorMessage = error.localizedDescription
