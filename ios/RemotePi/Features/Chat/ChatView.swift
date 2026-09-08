@@ -258,19 +258,21 @@ struct ChatView: View {
                 }
             }
             }
-            // Dim + non-interactive until history is loaded and the initial
+            // Opaque loading cover until history is loaded and the initial
             // bottom clamp settled — prevents jittery jump during load.
             .overlay(
                 Group {
                     if !sessionReady {
                         ZStack {
-                            Rectangle()
-                                .fill(theme.background.opacity(0.55))
-                                .ignoresSafeArea()
-                            VStack(spacing: 8) {
+                            theme.background.ignoresSafeArea()
+                            VStack(spacing: 14) {
+                                Image(systemName: "message.circle.fill")
+                                    .font(.system(size: 44))
+                                    .foregroundColor(theme.accent.opacity(0.6))
                                 ProgressView()
+                                    .scaleEffect(1.1)
                                 Text("Loading conversation…")
-                                    .font(.caption)
+                                    .font(.footnote)
                                     .foregroundColor(theme.secondaryText)
                             }
                         }
