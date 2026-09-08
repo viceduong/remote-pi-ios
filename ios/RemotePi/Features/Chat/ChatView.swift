@@ -766,7 +766,7 @@ struct MessageBubble: View {
     @MainActor private final class ParseGate {
         private var chain: Task<Void, Never>?
 
-        func enqueue(_ work: @escaping () -> Void) {
+        func enqueue(_ work: @escaping @Sendable () async -> Void) {
             chain = Task { [prev = chain] in
                 await prev?.value
                 await Task.detached(priority: .utility, operation: work).value
