@@ -209,7 +209,7 @@ struct TerminalText: View {
         let t = text
         let c = color
         let f = fontSize
-        Task.detached(priority: .userInitiated) {
+        Task.detached(priority: .utility) {
             let a = ANSIParser.attributed(
                 t,
                 baseFont: UIFont.monospacedSystemFont(ofSize: f, weight: .regular),

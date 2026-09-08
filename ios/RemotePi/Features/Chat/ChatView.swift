@@ -756,6 +756,24 @@ struct MessageBubble: View {
 
     private static let markdownCache = NSCache<NSString, NSAttributedString>()
 
+    /// Serial parse queue — markdown/ANSI parses for visible bubbles were
+    /// all spawned as concurrent `.userInitiated` tasks on session open,
+    /// saturating the cooperative pool and starving main-actor layout
+    /// (the multi-second freeze after opening a session). A serial queue
+    /// keeps parses off-main without the thundering herd.
+    @MainActor private static let parseGate = ParseGate()
+
+    @MainActor private final class ParseGate {
+        private var chain: Task<Void, Never>?
+
+        func enqueue(_ work: @escaping () -> Void) {
+            chain = Task { [prev = chain] in
+                await prev?.value
+                await Task.detached(priority: .utility, operation: work).value
+            }
+        }
+    }
+
     private func loadParsedText() {
         if parsedText != nil { return }
         let text = message.text
@@ -763,11 +781,11 @@ struct MessageBubble: View {
             parsedText = AttributedString(cached)
             return
         }
-        Task.detached(priority: .userInitiated) {
+        Self.parseGate.enqueue { [weak self] in
             let parsed = MessageBubble.parseMarkdown(text)
             let boxed = NSAttributedString(attributedString: parsed)
             Self.markdownCache.setObject(boxed, forKey: text as NSString)
-            await MainActor.run { self.parsedText = AttributedString(boxed) }
+            await MainActor.run { self?.parsedText = AttributedString(boxed) }
         }
     }
 
