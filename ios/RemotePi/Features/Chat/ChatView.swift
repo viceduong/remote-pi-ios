@@ -224,16 +224,26 @@ struct ChatView: View {
                         scrollToBottom(proxy, animated: false)
                     } else if Date().timeIntervalSince(lastAutoScroll) > 0.25 {
                         lastAutoScroll = Date()
-                        scrollToBottom(proxy, animated: false)
+                        // Defer one runloop pass: the row for the new message
+                        // may not be realized yet; scrolling immediately can
+                        // anchor to the previous layout and jump.
+                        DispatchQueue.main.async {
+                            scrollToBottom(proxy, animated: false)
+                        }
                     }
                 }
                 .onChange(of: viewModel.prependAnchor) { anchor in
                     guard let anchor else { return }
                     // The stable old-first-row ID remains in the list after a
-                    // prepend. Scroll to it after layout, preserving viewport.
+                    // prepend. Scroll to it after TWO layout passes so the
+                    // inserted rows are realized — a single async hop races
+                    // LazyVStack layout and lands the viewport at the wrong
+                    // offset (the scroll-up jump).
                     DispatchQueue.main.async {
-                        proxy.scrollTo(anchor, anchor: .top)
-                        viewModel.consumePrependAnchor()
+                        DispatchQueue.main.async {
+                            proxy.scrollTo(anchor, anchor: .top)
+                            viewModel.consumePrependAnchor()
+                        }
                     }
                 }
             }
@@ -392,6 +402,10 @@ struct ChatView: View {
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
+        // Anchor to the LAST VISIBLE row id. `proxy.scrollTo` with a stale or
+        // filtered-out id silently no-ops or lands at a wrong offset, which
+        // reads as a random jump when re-renders churn the tail (streaming,
+        // queue chips appearing/disappearing).
         if let last = visibleMessages.last {
             if animated {
                 withAnimation(.easeOut(duration: 0.25)) {
