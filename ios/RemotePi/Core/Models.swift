@@ -235,7 +235,13 @@ struct ChatMessage: Identifiable, Equatable {
     }
 
     var isBlankForDisplay: Bool {
-        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && thinking?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false && toolCalls.isEmpty
+        let textEmpty = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let thinkEmpty = thinking?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
+        // Assistant tool-call bubbles (text empty, only toolCalls) render as
+        // nothing visible in focus mode — they look like blank gaps. Hide
+        // them unless focus mode is off (chips are shown there).
+        let hasVisibleToolCalls = !toolCalls.isEmpty
+        return textEmpty && thinkEmpty && !hasVisibleToolCalls
     }
 
     static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {

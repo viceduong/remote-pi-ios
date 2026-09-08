@@ -79,6 +79,11 @@ struct ChatView: View {
         }
         return base.filter { msg in
             if msg.role == .tool { return true } // tool header still useful even if text collapsed
+            // Assistant tool-call-only bubbles render nothing in focus mode
+            // (chips hidden) — they appear as blank gaps between tool outputs.
+            if hideTools && msg.role == .assistant && msg.isBlankForDisplay && !msg.toolCalls.isEmpty {
+                return false
+            }
             return !msg.isBlankForDisplay
         }
     }
