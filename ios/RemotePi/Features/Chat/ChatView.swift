@@ -64,13 +64,27 @@ struct ChatView: View {
     /// Focus mode (default ON): hides tool output, calls, notes AND thinking.
     @AppStorage("hideToolsEnabled") private var hideTools = true
 
-    /// Focus-mode list: tool messages, tool-call chips, system notes and
-    /// thinking blocks hidden. Blank assistant/user bubbles (whitespace-only)
-    /// are always hidden — they render as empty gaps.
+    /// Cached visible list — recomputed only when messages or focus mode
+    /// change. `visibleMessages` used to be a computed property doing full
+    /// filter+copy over thousands of rows on EVERY render pass, freezing
+    /// scrolling for seconds after a session loads.
+    @State private var cachedVisible: [ChatMessage] = []
+    @State private var cachedSignature: String = ""
+
     private var visibleMessages: [ChatMessage] {
+        let msgs = viewModel.messages
+        let sig = "\(msgs.count)|\(msgs.last?.id ?? "")|\(hideTools)"
+        if sig != cachedSignature {
+            cachedSignature = sig
+            cachedVisible = Self.computeVisible(msgs, hideTools: hideTools)
+        }
+        return cachedVisible
+    }
+
+    private static func computeVisible(_ messages: [ChatMessage], hideTools: Bool) -> [ChatMessage] {
         let base: [ChatMessage]
         if hideTools {
-            base = viewModel.messages
+            base = messages
                 .filter { $0.role != .tool && !$0.isSystemNote }
                 .map { msg in
                     guard msg.thinking != nil else { return msg }
@@ -79,7 +93,7 @@ struct ChatView: View {
                     return m
                 }
         } else {
-            base = viewModel.messages
+            base = messages
         }
         return base.filter { msg in
             if msg.role == .tool { return true } // tool header still useful even if text collapsed
@@ -133,7 +147,7 @@ struct ChatView: View {
                             .frame(maxWidth: .infinity)
                             .padding(.top, 40)
                         }
-                        if hideTools && viewModel.messages.contains(where: { $0.role == .tool || $0.isSystemNote }) {
+                        if hideTools && !viewModel.messages.isEmpty && viewModel.messages.contains(where: { $0.role == .tool || $0.isSystemNote }) {
                             Button {
                                 withAnimation { hideTools = false }
                             } label: {
