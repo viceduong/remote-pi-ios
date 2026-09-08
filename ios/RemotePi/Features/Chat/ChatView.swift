@@ -441,6 +441,10 @@ struct MessageBubble: View {
                     userBubble
                 } else if message.role == .tool {
                     toolBubble
+                } else if message.isBlankForDisplay && !isStreaming {
+                    // Blank assistant bubbles (tool-call-only or empty) render
+                    // nothing — even an empty VStack contributes spacing.
+                    Color.clear.frame(height: 0)
                 } else {
                     assistantBubble
                 }
