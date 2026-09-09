@@ -199,14 +199,10 @@ struct ChatView: View {
                     ))
 
                     // Gesture-aware follow: never jump while the user drags.
-                    // allowsHitTesting(false) — this layer must never intercept
-                    // touches (it sat over the content as a dead patch that
-                    // swallowed taps and blocked scrolling).
                     Color.clear.frame(height: 1)
                         .background(ScrollPanDetector { active in
                             isUserScrolling = active
                         })
-                        .allowsHitTesting(false)
                 }
                 .coordinateSpace(name: "chatScroll")
                 .overlay(alignment: .bottomTrailing) {
@@ -576,6 +572,7 @@ struct MessageBubble: View {
                     Text(message.text)
                         .font(.system(size: scaled(11), design: .monospaced))
                         .foregroundColor(.primary)
+                        .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .lineLimit(noteExpanded ? nil : 6)
                         .padding(8)
@@ -611,6 +608,7 @@ struct MessageBubble: View {
                         .background(theme.userBubble)
                         .foregroundColor(.white)
                         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .textSelection(.enabled)
                     Button {
                         withAnimation(.easeOut(duration: 0.2)) { expanded.toggle() }
                     } label: {
@@ -630,6 +628,7 @@ struct MessageBubble: View {
                     .background(theme.userBubble)
                     .foregroundColor(.white)
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .textSelection(.enabled)
             }
         }
         .id(message.id)
@@ -658,13 +657,13 @@ struct MessageBubble: View {
                 if isStreaming {
                     // Plain text while streaming: markdown re-parse per delta is
                     // O(n²) and causes scroll lag on long messages.
-                    // NOTE: no textSelection — its UIKit gesture recognizers
-                    // eat scroll drags (the dead-touch patch over bubbles).
                     Text(message.text)
                         .font(.system(size: scaled(17)))
+                        .textSelection(.enabled)
                 } else {
                     Text(displayText)
                         .font(.system(size: scaled(17)))
+                        .textSelection(.enabled)
                         .onAppear { loadParsedText() }
                         .onChange(of: message.text) { _ in
                             parsedText = nil
@@ -729,7 +728,8 @@ struct MessageBubble: View {
                             .clipShape(RoundedRectangle(cornerRadius: 6))
                     } else {
                         TerminalText(text: message.text, color: message.isError ? .red : theme.terminalText, fontSize: scaled(11))
-                                .lineLimit(6)
+                            .textSelection(.enabled)
+                            .lineLimit(6)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(8)
                             .background(theme.secondaryBackground)
