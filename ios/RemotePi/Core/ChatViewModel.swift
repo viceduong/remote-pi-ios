@@ -339,9 +339,14 @@ final class ChatViewModel: ObservableObject {
                 hasMore = page.hasMore
                 return
             }
-            // Remember the current top so the view can keep its position.
-            prependAnchor = messages.first(where: { $0.role != .tool && !$0.isSystemNote })?.id
-                ?? messages.first?.id
+            // Remember the current top so the view can keep its position —
+            // but only when the user is actually reading history (not at
+            // bottom). Otherwise the anchor top-scroll fights the bottom
+            // follow on open.
+            if !viewportNearBottom {
+                prependAnchor = messages.first(where: { $0.role != .tool && !$0.isSystemNote })?.id
+                    ?? messages.first?.id
+            }
             if let index = streamingIndex { streamingIndex = index + fresh.count }
             if let index = pendingDeltaIndex { pendingDeltaIndex = index + fresh.count }
             messages.insert(contentsOf: fresh, at: 0)
