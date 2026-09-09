@@ -177,13 +177,7 @@ struct ChatView: View {
                             .onAppear {
                                 // Prefetch the previous page before the user
                                 // reaches the very top (smooth pagination).
-                                // GATED on !nearBottom: focus mode can shrink a
-                                // 100-row server page to a handful of visible
-                                // rows, so index<8 held permanently and the
-                                // prefetch looped — every prepend scrolled to
-                                // the top anchor while the bottom-follow yanked
-                                // back, leaving the session visually blank.
-                                if index < 8 && !nearBottom {
+                                if index < 8 {
                                     Task { await viewModel.loadMore() }
                                 }
                             }
