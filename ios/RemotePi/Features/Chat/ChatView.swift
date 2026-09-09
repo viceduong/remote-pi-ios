@@ -502,45 +502,71 @@ struct MessageBubble: View {
         HStack(alignment: .bottom) {
             if message.isSystemNote {
                 systemNoteView
+                    // Gestures live on the BUBBLE, not the row: a row-wide
+                    // contentShape + contextMenu intercepts touches in the
+                    // empty gutters (e.g. left of user bubbles) and blocks
+                    // scrolling there.
+                    .contentShape(Rectangle())
+                    .onLongPressGesture { onDiagnose(message) }
+                    .contextMenu {
+                        Button { onFocus(.result(message)) } label: {
+                            Label("Open details", systemImage: "arrow.up.left.and.arrow.down.right")
+                        }
+                        Button { onDiagnose(message) } label: {
+                            Label("Copy classification", systemImage: "doc.on.doc")
+                        }
+                    }
             } else {
                 if message.role == .user { Spacer(minLength: 60) }
 
                 if message.role == .user {
                     userBubble
+                        .contentShape(Rectangle())
+                        .onLongPressGesture { onDiagnose(message) }
+                        .contextMenu {
+                            if message.entryId != nil {
+                                Button { onFork(message) } label: {
+                                    Label("Fork from here", systemImage: "arrow.branch")
+                                }
+                            }
+                            Button { onFocus(.result(message)) } label: {
+                                Label("Open details", systemImage: "arrow.up.left.and.arrow.down.right")
+                            }
+                            Button { onDiagnose(message) } label: {
+                                Label("Copy classification", systemImage: "doc.on.doc")
+                            }
+                        }
                 } else if message.role == .tool {
                     toolBubble
+                        .contentShape(Rectangle())
+                        .onLongPressGesture { onDiagnose(message) }
+                        .contextMenu {
+                            Button { onFocus(.result(message)) } label: {
+                                Label("Open details", systemImage: "arrow.up.left.and.arrow.down.right")
+                            }
+                            Button { onDiagnose(message) } label: {
+                                Label("Copy classification", systemImage: "doc.on.doc")
+                            }
+                        }
                 } else if message.isBlankForDisplay && !isStreaming {
                     // Blank assistant bubbles (tool-call-only or empty) render
                     // nothing — even an empty VStack contributes spacing.
                     Color.clear.frame(height: 0)
                 } else {
                     assistantBubble
+                        .contentShape(Rectangle())
+                        .onLongPressGesture { onDiagnose(message) }
+                        .contextMenu {
+                            Button { onFocus(.result(message)) } label: {
+                                Label("Open details", systemImage: "arrow.up.left.and.arrow.down.right")
+                            }
+                            Button { onDiagnose(message) } label: {
+                                Label("Copy classification", systemImage: "doc.on.doc")
+                            }
+                        }
                 }
 
                 if message.role != .user { Spacer(minLength: 24) }
-            }
-        }
-        .contentShape(Rectangle())
-        .onLongPressGesture {
-            onDiagnose(message)
-        }
-        .contextMenu {
-            if message.role == .user && message.entryId != nil {
-                Button {
-                    onFork(message)
-                } label: {
-                    Label("Fork from here", systemImage: "arrow.branch")
-                }
-            }
-            Button {
-                onFocus(.result(message))
-            } label: {
-                Label("Open details", systemImage: "arrow.up.left.and.arrow.down.right")
-            }
-            Button {
-                onDiagnose(message)
-            } label: {
-                Label("Copy classification", systemImage: "doc.on.doc")
             }
         }
     }
