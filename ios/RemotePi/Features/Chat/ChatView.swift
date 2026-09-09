@@ -375,15 +375,6 @@ struct ChatView: View {
         }
         .task { await viewModel.start() }
         .task {
-            // Loading-cover watchdog: never keep the session dimmed/disabled
-            // for more than 8s no matter what (fetch stall, clamp failure,
-            // lazy layout pathology). The user can always scroll afterwards.
-            try? await Task.sleep(nanoseconds: 8_000_000_000)
-            if !sessionReady {
-                withAnimation(.easeIn(duration: 0.15)) { sessionReady = true }
-            }
-        }
-        .task {
             // Keep the host-ownership banner current.
             while !Task.isCancelled {
                 if let summary = try? await client.fetchSession(session.id) {

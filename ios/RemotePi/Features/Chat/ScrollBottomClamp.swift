@@ -24,16 +24,7 @@ struct ScrollBottomClamp: UIViewRepresentable {
         context.coordinator.didClamp = true
         let coordinator = context.coordinator
         DispatchQueue.main.async {
-            guard let scrollView = coordinator.findScrollView() else {
-                // No scroll view found — fail OPEN. Never leave the session
-                // dimmed/disabled forever (looked like a blank session).
-                onClamped()
-                return
-            }
-            // Safety timeout: even if lazy content keeps growing, undim after
-            // 4s so the session can never get stuck behind the loading cover.
-            let safety = DispatchWorkItem { onClamped() }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: safety)
+            guard let scrollView = coordinator.findScrollView() else { return }
             func clamp() {
                 guard scrollView.contentSize.height > scrollView.bounds.height else { return }
                 scrollView.setContentOffset(
@@ -54,7 +45,6 @@ struct ScrollBottomClamp: UIViewRepresentable {
                 clamp()
                 attempts += 1
                 if settled() || attempts >= 12 {
-                    safety.cancel()
                     onClamped()
                     return
                 }
