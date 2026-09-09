@@ -566,6 +566,9 @@ struct MessageBubble: View {
                         }
                 }
 
+                // Layout spacer (non-interactive): pushes assistant/tool
+                // content left and fills the rest of the row. Pure layout —
+                // no gesture attached, fully touch-transparent.
                 if message.role != .user { Spacer(minLength: 24) }
             }
         }
@@ -710,7 +713,10 @@ struct MessageBubble: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // No full-width frame here: with maxWidth: .infinity the bubble's
+        // contentShape + contextMenu covered the whole right side of the row
+        // and intercepted touches. The outer HStack Spacer provides layout;
+        // hit-testing stays limited to actual content.
         .padding(.leading, 4)
     }
 
