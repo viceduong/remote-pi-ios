@@ -13,6 +13,9 @@ struct ServerListView: View {
     @State private var showSessionsFor: ServerConfig?
     @State private var editingServer: ServerConfig?
     @State private var showEdit = false
+    /// One-shot: with a single configured host, jump straight into it instead
+    /// of showing a list of one. Never re-fires after the user backs out.
+    @State private var didAutoSelect = false
 
     var body: some View {
         List {
@@ -70,6 +73,7 @@ struct ServerListView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .task { autoSelectSingleHost() }
         .toolbar {
             ToolbarItemGroup(placement: .navigationBarTrailing) {
                 Button {
@@ -113,6 +117,14 @@ struct ServerListView: View {
         } message: {
             Text(errorMessage ?? "")
         }
+    }
+
+    /// Single-host convenience: skip the one-row list and connect immediately.
+    private func autoSelectSingleHost() {
+        guard !didAutoSelect, store.servers.count == 1,
+              let only = store.servers.first, showSessionsFor == nil else { return }
+        didAutoSelect = true
+        connect(only)
     }
 
     private func connect(_ server: ServerConfig) {
