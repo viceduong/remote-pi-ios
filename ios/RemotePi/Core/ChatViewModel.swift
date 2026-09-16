@@ -225,9 +225,10 @@ final class ChatViewModel: ObservableObject {
         do {
             let resp = try await client.sendTurn(sessionId, message: trimmed, force: force,
                                                  clientMessageId: clientMessageId)
-            if resp.queued {
-                // Keep an existing turn's state intact. The queue item is a
-                // durable pending bubble; queue_update removes it on delivery.
+            if resp.queued && resp.dispatched != true {
+                // TRULY queued (agent busy, item held in the durable outbox).
+                // A dispatched prompt (idle session, running now) must not get
+                // a chip — it duplicated the optimistic blue bubble.
                 let depth = resp.queueDepth ?? 1
                 queuedNote = depth > 3
                     ? "⏳ Queued — \(depth) messages ahead of yours"

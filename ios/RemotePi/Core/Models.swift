@@ -198,6 +198,9 @@ struct TurnResponse: Decodable {
     let queueItemId: String?
     /// Server queue depth at accept time (backpressure signal).
     let queueDepth: Int?
+    /// True when the prompt went to the agent immediately (idle session) —
+    /// no queued chip should be rendered (it duplicated the blue bubble).
+    let dispatched: Bool?
 }
 
 // MARK: - Chat display model
