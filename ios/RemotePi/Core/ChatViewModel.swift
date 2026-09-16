@@ -213,7 +213,18 @@ final class ChatViewModel: ObservableObject {
         guard !trimmed.isEmpty else { return }
         pendingText = ""
         let clientMessageId = UUID().uuidString
-        let optimisticId = appendUserMessage(trimmed, clientMessageId: clientMessageId)
+        // UX: the message renders as a QUEUED chip first, and becomes a real
+        // blue bubble only when the server confirms delivery (user echo via
+        // message_end / refreshFromServer). No optimistic bubble — it caused
+        // doubles on reopen (echo + optimistic copy with no entryId link).
+        let pendingChip = QueueItem(id: "pending:\(clientMessageId)", clientMessageId: clientMessageId,
+                                    message: trimmed, status: "queued",
+                                    queuedAt: Int(Date().timeIntervalSince1970 * 1000),
+                                    startedAt: nil, completedAt: nil, error: nil)
+        queuedItems.append(pendingChip)
+        queuedNote = queuedItems.count > 1
+            ? "⏳ \(queuedItems.count) messages queued"
+            : nil
         let wasStreaming = isStreaming
         // Immediate feedback: the response can take a second to start, and the
         // first SSE event may lag — show a waiting state right away.
@@ -225,10 +236,11 @@ final class ChatViewModel: ObservableObject {
         do {
             let resp = try await client.sendTurn(sessionId, message: trimmed, force: force,
                                                  clientMessageId: clientMessageId)
+            // Replace the pending chip with the durable server item (or drop
+            // it — the server echo will render the real bubble).
+            queuedItems.removeAll { $0.id == pendingChip.id }
             if resp.queued && resp.dispatched != true {
                 // TRULY queued (agent busy, item held in the durable outbox).
-                // A dispatched prompt (idle session, running now) must not get
-                // a chip — it duplicated the optimistic blue bubble.
                 let depth = resp.queueDepth ?? 1
                 queuedNote = depth > 3
                     ? "⏳ Queued — \(depth) messages ahead of yours"
@@ -242,25 +254,25 @@ final class ChatViewModel: ObservableObject {
                 }
             } else {
                 // Idempotent retry may resolve to an already-completed queue
-                // item. Remove the orphan optimistic bubble and reconcile.
-                messages.removeAll { $0.id == optimisticId }
+                // item — the server echo (via refresh) renders the real bubble.
                 await refreshFromServer()
             }
         } catch {
+            // Drop the pending chip on any failure — error paths below decide
+            // whether the text goes to the offline outbox.
+            queuedItems.removeAll { $0.id == pendingChip.id }
+            if queuedItems.isEmpty { queuedNote = nil }
             if error is CancellationError || (error as NSError).code == NSURLErrorCancelled {
                 // Swift Task cancellation (view disappeared, app backgrounded, or
-                // explicit Task.cancel). Don't discard the user's text — keep the
-                // optimistic bubble and treat as offline so it retries on reconnect.
-                // The next poll/SSE reconnect will reconcile via clientMessageId.
+                // explicit Task.cancel). Don't discard the user's text — keep it
+                // as an offline pending bubble; it retries on reconnect.
                 if !wasStreaming { isStreaming = false; workingText = nil }
-                // Keep optimistic message visible; also queue offline if force not already
                 if offlinePending.count < 100, !offlinePending.contains(where: { $0.id.uuidString == clientMessageId }) {
                     offlinePending.append(OfflineMessage(text: trimmed, id: UUID(uuidString: clientMessageId) ?? UUID()))
                     Task { await saveOfflineQueue() }
                 }
                 return
             }
-            messages.removeAll { $0.id == optimisticId }
             if !wasStreaming { isStreaming = false; workingText = nil }
             if case APIError.offline = error {
                 guard offlinePending.count < 100 else {
@@ -313,6 +325,13 @@ final class ChatViewModel: ObservableObject {
             // History may already contain previously queued prompts — clear stale chips
             reconcileQueued(page.messages)
             if queuedItems.isEmpty { queuedNote = nil }
+            // Reopen-double fix: drop offline-pending items the server already
+            // delivered (send succeeded but the response was lost — the text
+            // was retried into the outbox even though the server has it).
+            let deliveredTexts = Set(page.messages.filter { $0.role == .user }.map { $0.text })
+            let before = offlinePending.count
+            offlinePending.removeAll { deliveredTexts.contains($0.text) }
+            if offlinePending.count != before { Task { await saveOfflineQueue() } }
             working = page.working
             applyWorkingIndicator()
             hasMore = page.hasMore
@@ -924,19 +943,5 @@ final class ChatViewModel: ObservableObject {
         if finalize {
             streamingIndex = nil
         }
-    }
-
-    @discardableResult
-    private func appendUserMessage(_ text: String, clientMessageId: String) -> String {
-        let message = ChatMessage(id: "client:\(clientMessageId)", entryId: nil,
-                                  clientMessageId: clientMessageId,
-                                  role: .user, text: text, thinking: nil,
-                                  toolCalls: [], toolActivity: nil,
-                                  isError: false, toolName: nil, isSystemNote: false,
-                                  model: nil, errorMessage: nil,
-                                  timestamp: Int(Date().timeIntervalSince1970 * 1000))
-        messages.append(message)
-        streamingIndex = nil
-        return message.id
     }
 }
