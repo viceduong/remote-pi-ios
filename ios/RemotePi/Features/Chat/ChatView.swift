@@ -854,14 +854,53 @@ struct MessageBubble: View {
 
     private static func parseMarkdown(_ text: String) -> NSAttributedString {
         NSAttributedString((try? AttributedString(
-            markdown: text,
+            markdown: Self.escapeFalseTildes(text),
             options: AttributedString.MarkdownParsingOptions(
                 interpretedSyntax: .inlineOnlyPreservingWhitespace)
         )) ?? AttributedString(text))
     }
 
+    /// Neutralize tilde pairs outside code spans so the Markdown parser never
+    /// renders false strikethrough on paths/approximations (`~/x` … `~/y`,
+    /// `costs ~5 s` … `~2.0`, literal `~~` in diffs). Intentional strikethrough
+    /// is rare in coding-agent output; when present it degrades to the literal
+    /// `~~text~~`, which is acceptable and unambiguous.
+    private static func escapeFalseTildes(_ text: String) -> String {
+        guard text.contains("~") else { return text }
+        var out = ""
+        out.reserveCapacity(text.count)
+        var inBackticks = false
+        var i = text.startIndex
+        var tildeRun = 0 // consecutive tildes in current non-code span
+        while i < text.endIndex {
+            let ch = text[i]
+            if ch == "`" {
+                inBackticks.toggle()
+                tildeRun = 0
+                out.append(ch)
+            } else if ch == "~" && !inBackticks {
+                tildeRun += 1
+                if tildeRun == 2 {
+                    // Escape the pair so GFM strikethrough never triggers.
+                    out.append("\\~\\~")
+                    tildeRun = 0
+                }
+            } else {
+                if tildeRun > 0 {
+                    // Flush an unpaired tilde literally.
+                    out.append(String(repeating: "~", count: tildeRun))
+                    tildeRun = 0
+                }
+                out.append(ch)
+            }
+            i = text.index(after: i)
+        }
+        if tildeRun > 0 { out.append(String(repeating: "~", count: tildeRun)) }
+        return out
+    }
+
     private func rendered(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text,
+        (try? AttributedString(markdown: Self.escapeFalseTildes(text),
                                options: AttributedString.MarkdownParsingOptions(
                                    interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
     }
