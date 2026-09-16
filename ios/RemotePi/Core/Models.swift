@@ -61,6 +61,47 @@ struct QueueItem: Decodable, Identifiable, Equatable {
     let error: String?
 }
 
+/// Cumulative provider usage from pi 0.85 `message_update.usage`.
+struct SessionUsage: Equatable {
+    let input: Int
+    let output: Int
+    let totalTokens: Int
+    let cost: Double?
+
+    init?(json: [String: Any]) {
+        guard let input = json["input"] as? Int,
+              let output = json["output"] as? Int else { return nil }
+        self.input = input
+        self.output = output
+        self.totalTokens = (json["totalTokens"] as? Int) ?? input + output
+        if let cost = json["cost"] as? [String: Any], let total = cost["total"] as? Double {
+            self.cost = total
+        } else {
+            self.cost = nil
+        }
+    }
+}
+
+/// Session token/cost stats from pi 0.85 `get_session_stats`.
+struct SessionStats: Equatable {
+    let totalTokens: Int
+    let cost: Double?
+    let contextPercent: Double?
+
+    init?(json: [String: Any]) {
+        guard let tokens = json["tokens"] as? [String: Any],
+              let total = tokens["total"] as? Int else { return nil }
+        self.totalTokens = total
+        if let c = json["cost"] as? Double { self.cost = c } else { self.cost = nil }
+        if let ctx = json["contextUsage"] as? [String: Any],
+           let pct = ctx["percent"] as? Double {
+            self.contextPercent = pct
+        } else {
+            self.contextPercent = nil
+        }
+    }
+}
+
 /// GET /api/sessions/:id/messages — wire format (server/src/history.ts shape).
 struct WireMessage: Decodable {
     let id: String?

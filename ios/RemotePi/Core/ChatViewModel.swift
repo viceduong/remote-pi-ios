@@ -40,6 +40,10 @@ final class ChatViewModel: ObservableObject {
     /// Server-derived working flag (works for mirror sessions too — RPC
     /// events never reach clients there, so the file state is the signal).
     @Published private(set) var working = false
+    /// Latest cumulative provider usage from message_update (pi 0.85).
+    @Published private(set) var liveUsage: SessionUsage?
+    /// Session token/cost stats from get_session_stats (pi 0.85).
+    @Published private(set) var stats: SessionStats?
     /// Locally-queued sends while offline (persisted, flushed on reconnect).
     @Published private(set) var offlinePending: [OfflineMessage] = []
     private var flushingOffline = false
@@ -67,6 +71,10 @@ final class ChatViewModel: ObservableObject {
 
     /// Index of the assistant bubble currently receiving deltas.
     private var streamingIndex: Int?
+    /// toolCallId currently executing (tool_execution_update correlation).
+    private var activeToolCallId: String?
+    /// Durable entry-id cursor for cheap reconnects (?since= fetch).
+    private var lastSeenEntryId: String?
     private var lastFrameTime = Date()
 
     init(client: APIClient, sessionId: String) {
@@ -132,6 +140,10 @@ final class ChatViewModel: ObservableObject {
                 if Date().timeIntervalSince(self.lastFrameTime) > 30 {
                     await self.refreshFromServer()
                 }
+                // pi 0.85 stats: refresh context/cost periodically.
+                if let stats = try? await self.client.fetchStats(self.sessionId) {
+                    self.stats = stats
+                }
             }
         }
     }
@@ -152,7 +164,19 @@ final class ChatViewModel: ObservableObject {
 
     private func refreshFromServer() async {
         guard lifecycleActive else { return }
-        guard let page = try? await client.fetchMessages(sessionId, limit: 200) else { return }
+        // Cursor reconnect: fetch only entries after the last one we hold.
+        // Falls back to a full 200-row refetch when the cursor is unknown
+        // (compaction/branch switch server-side).
+        let page: (messages: [ChatMessage], hasMore: Bool, total: Int, pending: [String], working: Bool)
+        if let lastId = lastSeenEntryId,
+           let delta = try? await client.fetchMessages(sessionId, limit: 200, since: lastId),
+           !delta.messages.isEmpty {
+            page = delta
+        } else if let full = try? await client.fetchMessages(sessionId, limit: 200) {
+            page = full
+        } else {
+            return
+        }
         guard lifecycleActive else { return }
         // Watchdog: clear the indicator if the host agent has been quiet for a
         // while AND the server no longer reports it as working.
@@ -172,6 +196,10 @@ final class ChatViewModel: ObservableObject {
             return (message.timestamp ?? 0) >= newestLocal && !isDuplicate(message)
         }
         if !fresh.isEmpty { appendTail(fresh) }
+        // Advance the reconnect cursor to the newest server entry id.
+        if let last = page.messages.last(where: { $0.entryId != nil })?.entryId {
+            lastSeenEntryId = last
+        }
     }
 
     func setViewportNearBottom(_ value: Bool) {
@@ -284,6 +312,10 @@ final class ChatViewModel: ObservableObject {
             applyWorkingIndicator()
             hasMore = page.hasMore
             lowestFetchedTs = page.messages.compactMap { $0.timestamp }.min()
+            // Seed the reconnect cursor from the newest entry.
+            if let last = page.messages.last(where: { $0.entryId != nil })?.entryId {
+                lastSeenEntryId = last
+            }
         } catch {
             if isCancellation(error) { return }
             errorMessage = error.localizedDescription
@@ -423,9 +455,30 @@ final class ChatViewModel: ObservableObject {
             isStreaming = false
             working = false
             workingText = nil
+        case "agent_settled":
+            // pi 0.85: the FULL run is settled — no retry, compaction retry,
+            // or queued continuation remains. This is the authoritative
+            // "done" signal; clears the working indicator immediately
+            // instead of waiting on the 25s file-activity watchdog.
+            isStreaming = false
+            working = false
+            workingText = nil
+            fileActivityAt = nil
         case "tool_execution_start":
             // Status-only: no bubble (message events render the result), but
             // the user sees what the agent is doing right now.
+            if let name = obj["toolName"] as? String {
+                workingText = "Running \(name)…"
+                fileActivityAt = Date()
+                activeToolCallId = obj["toolCallId"] as? String
+            }
+        case "tool_execution_update":
+            // pi 0.85: streams tool progress with the ACCUMULATED partial
+            // result (not a delta) keyed by toolCallId. Render live output
+            // into the tool bubble while the command runs.
+            handleToolExecutionUpdate(obj)
+        case "tool_execution_end":
+            activeToolCallId = nil
             if let name = obj["toolName"] as? String {
                 workingText = "Running \(name)…"
             }
@@ -449,7 +502,24 @@ final class ChatViewModel: ObservableObject {
             isStreaming = false
             connectionState = .disconnected
         case "queue_update":
-            if let items = obj["items"] as? [[String: Any]] {
+            // pi 0.85 native shape: { steering: [text], followUp: [text] }.
+            // Bridge legacy shape: { items: [QueueItem] }.
+            if let steering = obj["steering"] as? [String],
+               let followUp = obj["followUp"] as? [String] {
+                var parsed: [QueueItem] = []
+                for (i, text) in steering.enumerated() {
+                    parsed.append(QueueItem(id: "steer-\(i)", clientMessageId: nil,
+                                            message: text, status: "queued",
+                                            queuedAt: nil, startedAt: nil, completedAt: nil, error: nil))
+                }
+                for (i, text) in followUp.enumerated() {
+                    parsed.append(QueueItem(id: "followup-\(i)", clientMessageId: nil,
+                                            message: text, status: "queued",
+                                            queuedAt: nil, startedAt: nil, completedAt: nil, error: nil))
+                }
+                queuedItems = parsed
+                queuedNote = parsed.isEmpty ? nil : "\(parsed.count) message\(parsed.count > 1 ? "s" : "") queued — agent is busy"
+            } else if let items = obj["items"] as? [[String: Any]] {
                 let parsed = items.compactMap { d -> QueueItem? in
                     guard let id = d["id"] as? String, let message = d["message"] as? String else { return nil }
                     return QueueItem(id: id, clientMessageId: d["clientMessageId"] as? String,
@@ -542,6 +612,10 @@ final class ChatViewModel: ObservableObject {
             // Keep last known queue on fetch failure; don't show stale note if we know it's empty
             if queuedItems.isEmpty { queuedNote = nil }
         }
+        // pi 0.85 stats: tokens/cost/context (best-effort, mirror sessions skip).
+        if let stats = try? await client.fetchStats(sessionId) {
+            self.stats = stats
+        }
     }
 
     /// Persisted offline queue helpers.
@@ -620,6 +694,10 @@ final class ChatViewModel: ObservableObject {
 
     /// Streamed deltas update the in-progress assistant (or tool) bubble.
     private func handleUpdate(_ obj: [String: Any]) {
+        // pi 0.85: cumulative provider usage rides every message_update.
+        if let usageJson = obj["usage"] as? [String: Any], let u = SessionUsage(json: usageJson) {
+            liveUsage = u
+        }
         guard let ev = obj["assistantMessageEvent"] as? [String: Any] else { return }
         let type = ev["type"] as? String ?? ""
         if type == "thinking_delta" {
@@ -627,6 +705,11 @@ final class ChatViewModel: ObservableObject {
         }
         if type == "text_delta" {
             if workingText != "Writing…" { workingText = "Writing…" }
+        }
+        // pi 0.85: tool-call arguments stream incrementally. Surface the
+        // forming call in the working indicator (real-time feedback).
+        if type == "toolcall_start", let name = ev["toolName"] as? String {
+            workingText = "Calling \(name)…"
         }
         if let msg = obj["message"] as? [String: Any], Self.isToolMessage(msg) {
             // Tool result streaming: append deltas to the last tool bubble.
@@ -655,6 +738,40 @@ final class ChatViewModel: ObservableObject {
             if type == "error" { isStreaming = false }
         default:
             break
+        }
+    }
+
+    /// pi 0.85 `tool_execution_update`: `partialResult` holds the ACCUMULATED
+    /// output so far (not a delta) — replace the matching tool bubble's text.
+    /// Correlate by toolCallId; fall back to the last tool bubble.
+    private func handleToolExecutionUpdate(_ obj: [String: Any]) {
+        guard let partial = obj["partialResult"] as? [String: Any],
+              let blocks = partial["content"] as? [[String: Any]] else { return }
+        var text = ""
+        for b in blocks where (b["type"] as? String) == "text" {
+            if let t = b["text"] as? String { text += t }
+        }
+        guard !text.isEmpty else { return }
+        fileActivityAt = Date()
+        let idx: Int?
+        if let callId = obj["toolCallId"] as? String {
+            idx = messages.lastIndex(where: { $0.toolCalls.contains(where: { $0.id == callId }) })
+                ?? messages.lastIndex(where: { $0.role == .tool && $0.toolName == (obj["toolName"] as? String) })
+        } else {
+            idx = messages.lastIndex(where: { $0.role == .tool })
+        }
+        guard let idx, messages.indices.contains(idx) else { return }
+        // Replace (accumulated, not delta) — throttle via the delta flusher
+        // to avoid render storms on chatty tools.
+        if let pendingDeltaIndex, pendingDeltaIndex != idx { flushPendingDelta() }
+        pendingDeltaIndex = idx
+        pendingDelta = text
+        guard flushTask == nil else { return }
+        flushTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard let self, !Task.isCancelled else { return }
+            self.flushTask = nil
+            self.flushPendingDelta()
         }
     }
 

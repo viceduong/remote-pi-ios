@@ -155,7 +155,7 @@ struct APIClient {
     }
 
     /// GET /api/sessions/:id/messages — last N messages, paginated with `before`.
-    func fetchMessages(_ id: String, limit: Int = 100, before: Int? = nil) async throws -> (messages: [ChatMessage], hasMore: Bool, total: Int, pending: [String], working: Bool) {
+    func fetchMessages(_ id: String, limit: Int = 100, before: Int? = nil, since: String? = nil) async throws -> (messages: [ChatMessage], hasMore: Bool, total: Int, pending: [String], working: Bool) {
         struct Pending: Decodable { let text: String }
         struct Wrapper: Decodable {
             let messages: [WireMessage]
@@ -166,6 +166,7 @@ struct APIClient {
         }
         var query = "?limit=\(limit)"
         if let before { query += "&before=\(before)" }
+        if let since { query += "&since=\(since)" }
         let wrapper: Wrapper = try await get("/api/sessions/\(id)/messages\(query)")
         return (wrapper.messages.map { $0.toChatMessage() }, wrapper.hasMore ?? false,
                 wrapper.total ?? 0, wrapper.pending?.map(\.text) ?? [], wrapper.working ?? false)
@@ -211,6 +212,23 @@ struct APIClient {
     func cancelQueued(_ id: String, itemId: String) async throws {
         try await delete("/api/sessions/\(id)/queue/\(itemId)")
     }
+
+    /// pi 0.85 get_session_stats via the bridge.
+    func fetchStats(_ id: String) async throws -> SessionStats {
+        struct Wrapper: Decodable { let stats: StatsJSON }
+        struct StatsJSON: Decodable {
+            let tokens: [String: Int]
+            let cost: Double?
+            let contextUsage: [String: Double]?
+        }
+        let wrapper: Wrapper = try await get("/api/sessions/\(id)/stats")
+        var json: [String: Any] = [:]
+        json["tokens"] = wrapper.stats.tokens
+        json["cost"] = wrapper.stats.cost as Any?
+        json["contextUsage"] = wrapper.stats.contextUsage as Any?
+        return SessionStats(json: json) ?? SessionStats(totalTokens: 0, cost: nil, contextPercent: nil)
+    }
+
 
     /// Fork the session at a user message (or latest when entryId is nil).
     func forkSession(_ id: String, entryId: String? = nil, name: String? = nil) async throws -> (SessionSummary, String?) {

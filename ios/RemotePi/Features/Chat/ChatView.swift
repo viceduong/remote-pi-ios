@@ -335,6 +335,31 @@ struct ChatView: View {
                     Color.clear.frame(height: 26)
                 }
 
+                // pi 0.85 stats strip: context % + tokens + live cost.
+                // Only rendered when data exists — zero chrome otherwise.
+                if viewModel.stats != nil || viewModel.liveUsage != nil {
+                    HStack(spacing: 10) {
+                        if let pct = viewModel.stats?.contextPercent {
+                            Label("\(Int(pct))%", systemImage: "gauge.medium")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundColor(pct > 90 ? .red : pct > 70 ? .orange : theme.secondaryText)
+                        }
+                        if let tokens = viewModel.stats?.totalTokens, tokens > 0 {
+                            Text("\(tokens.formatted()) tok")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundColor(theme.secondaryText)
+                        }
+                        if let cost = viewModel.stats?.cost, cost > 0 {
+                            Text("$\(cost, specifier: \"%.2f\")")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundColor(theme.secondaryText)
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 3)
+                }
+
                 ComposerView(viewModel: viewModel)
             }
         }
