@@ -340,9 +340,39 @@ final class ChatViewModel: ObservableObject {
             if let last = page.messages.last(where: { $0.entryId != nil })?.entryId {
                 lastSeenEntryId = last
             }
+            // Blank-page guard: a session tail that is one long tool loop can
+            // be 100% hidden in focus mode (all empty tool-call assistants +
+            // tool outputs). Keep fetching older pages until something is
+            // visible (bounded) so the session never opens blank.
+            var guardPages = 0
+            while hasMore, guardPages < 10,
+                  Self.hasVisibleContent(messages) == false {
+                guardPages += 1
+                guard let earliest = messages.compactMap({ $0.timestamp }).min() else { break }
+                if let more = try? await client.fetchMessages(sessionId, limit: 100, before: earliest),
+                   !more.messages.isEmpty {
+                    messages.insert(contentsOf: more.messages, at: 0)
+                    hasMore = more.hasMore
+                    lowestFetchedTs = more.messages.compactMap { $0.timestamp }.min() ?? lowestFetchedTs
+                } else { break }
+            }
         } catch {
             if isCancellation(error) { return }
             errorMessage = error.localizedDescription
+        }
+    }
+
+    /// True when at least one message would render in focus mode (non-tool,
+    /// non-empty text/thinking). Used by the blank-page guard in loadHistory.
+    private static func hasVisibleContent(_ messages: [ChatMessage]) -> Bool {
+        messages.contains { m in
+            if m.role == .tool || m.isSystemNote { return false }
+            if m.role == .assistant,
+               m.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               (m.thinking ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return false
+            }
+            return true
         }
     }
 
