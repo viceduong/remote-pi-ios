@@ -350,7 +350,7 @@ struct ChatView: View {
                                 .foregroundColor(theme.secondaryText)
                         }
                         if let cost = viewModel.stats?.cost, cost > 0 {
-                            Text("$\(cost, specifier: \"%.2f\")")
+                            Text(String(format: "$%.2f", cost))
                                 .font(.caption2.monospacedDigit())
                                 .foregroundColor(theme.secondaryText)
                         }

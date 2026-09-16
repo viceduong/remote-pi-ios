@@ -226,7 +226,8 @@ struct APIClient {
         json["tokens"] = wrapper.stats.tokens
         json["cost"] = wrapper.stats.cost as Any?
         json["contextUsage"] = wrapper.stats.contextUsage as Any?
-        return SessionStats(json: json) ?? SessionStats(totalTokens: 0, cost: nil, contextPercent: nil)
+        if let stats = SessionStats(json: json) { return stats }
+        throw APIError.decoding("malformed session stats")
     }
 
 
