@@ -669,6 +669,12 @@ final class ChatViewModel: ObservableObject {
     func loadQueue() async {
         if let items = try? await client.fetchQueue(sessionId) {
             queuedItems = items.filter { $0.status != "done" && $0.status != "failed" }
+            // Reopen-double guard: a queued item whose text already exists as
+            // a delivered user message in history was dispatched but the
+            // queue file wasn't updated (dispatch race). Drop the chip —
+            // the history bubble is authoritative.
+            let historyTexts = Set(messages.filter { $0.role == .user }.map { $0.text })
+            queuedItems.removeAll { historyTexts.contains($0.message) }
             if !queuedItems.isEmpty {
                 queuedNote = "\(queuedItems.count) message\(queuedItems.count > 1 ? "s" : "") queued — agent is busy"
             } else {
