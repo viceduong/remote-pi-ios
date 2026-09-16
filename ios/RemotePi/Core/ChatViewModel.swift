@@ -228,12 +228,16 @@ final class ChatViewModel: ObservableObject {
             if resp.queued {
                 // Keep an existing turn's state intact. The queue item is a
                 // durable pending bubble; queue_update removes it on delivery.
-                queuedNote = "⏳ Queued — agent is busy, your message will go in when it finishes"
+                let depth = resp.queueDepth ?? 1
+                queuedNote = depth > 3
+                    ? "⏳ Queued — \(depth) messages ahead of yours"
+                    : "⏳ Queued — agent is busy, your message will go in when it finishes"
                 if let id = resp.queueItemId,
                    !queuedItems.contains(where: { $0.id == id }) {
                     queuedItems.append(QueueItem(id: id, clientMessageId: clientMessageId,
                                                  message: trimmed, status: "queued",
-                                                 queuedAt: nil, startedAt: nil, completedAt: nil, error: nil))
+                                                 queuedAt: Int(Date().timeIntervalSince1970 * 1000),
+                                                 startedAt: nil, completedAt: nil, error: nil))
                 }
             } else {
                 // Idempotent retry may resolve to an already-completed queue
@@ -524,7 +528,10 @@ final class ChatViewModel: ObservableObject {
                     guard let id = d["id"] as? String, let message = d["message"] as? String else { return nil }
                     return QueueItem(id: id, clientMessageId: d["clientMessageId"] as? String,
                                      message: message, status: d["status"] as? String ?? "queued",
-                                     queuedAt: nil, startedAt: nil, completedAt: nil, error: nil)
+                                     queuedAt: (d["queuedAt"] as? NSNumber)?.intValue,
+                                     startedAt: (d["startedAt"] as? NSNumber)?.intValue,
+                                     completedAt: (d["completedAt"] as? NSNumber)?.intValue,
+                                     error: d["error"] as? String)
                 }
                 queuedItems = parsed.filter { $0.status != "done" && $0.status != "failed" }
                 if queuedItems.isEmpty { queuedNote = nil }
@@ -591,11 +598,29 @@ final class ChatViewModel: ObservableObject {
     private func reconcileQueued(_ newMessages: [ChatMessage]) {
         guard !queuedItems.isEmpty else { return }
         for m in newMessages where m.role == .user {
-            if let idx = queuedItems.firstIndex(where: { $0.message == m.text }) {
+            // Match by clientMessageId first (durable identity), fall back to
+            // exact text. Text-only matching caused the same message to appear
+            // twice locally (optimistic bubble + queued chip) when the server
+            // echoed it under a different clientMessageId.
+            var removed = false
+            if let cid = m.clientMessageId,
+               let idx = queuedItems.firstIndex(where: { $0.clientMessageId == cid }) {
                 queuedItems.remove(at: idx)
+                removed = true
             }
-            if queuedItems.isEmpty { queuedNote = nil }
+            if !removed, let idx = queuedItems.firstIndex(where: { $0.message == m.text }) {
+                queuedItems.remove(at: idx)
+                removed = true
+            }
+            if removed {
+                // Also drop the optimistic copy if a server copy arrived —
+                // prevents double bubbles for the same clientMessageId.
+                if let cid = m.clientMessageId {
+                    messages.removeAll { $0.id == "client:\(cid)" && m.id != $0.id }
+                }
+            }
         }
+        if queuedItems.isEmpty { queuedNote = nil }
     }
 
     /// Server truth from /queue (durable outbox) — fetch on open so queued
@@ -654,6 +679,15 @@ final class ChatViewModel: ObservableObject {
                 if response.queued { await loadQueue() }
             } catch {
                 if isCancellation(error) { break }
+                // Poison-message handling: permanent failures (4xx — too long,
+                // malformed, auth) would otherwise block the whole queue
+                // forever. Drop the item, surface the error, keep flushing.
+                if case APIError.http(let code, let message, _) = error, (400..<500).contains(code) {
+                    offlinePending.removeFirst()
+                    errorMessage = "Message dropped: \(message ?? "HTTP \(code)")"
+                    await saveOfflineQueue()
+                    continue
+                }
                 break // still offline — keep the rest
             }
         }

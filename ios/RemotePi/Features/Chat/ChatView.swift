@@ -157,16 +157,6 @@ struct ChatView: View {
                             }
                             .padding(.vertical, 4)
                         }
-                        ForEach(viewModel.queuedItems) { item in
-                            QueuedBubble(item: item) {
-                                Task { await viewModel.cancelQueued(item.id) }
-                            }
-                        }
-                        ForEach(viewModel.offlinePending) { item in
-                            OfflineBubble(text: item.text) {
-                                withAnimation { viewModel.discardOffline(item.id) }
-                            }
-                        }
                         ForEach(Array(visibleMessages.enumerated()), id: \.element.id) { index, message in
                             MessageBubble(message: message, isStreaming: isStreaming(message),
                                           hideToolCalls: hideTools,
@@ -180,6 +170,19 @@ struct ChatView: View {
                                 if index < 8 {
                                     Task { await viewModel.loadMore() }
                                 }
+                            }
+                        }
+                        // Queued + offline bubbles render AFTER messages —
+                        // they are the newest pending content and belong at
+                        // the bottom (above the composer), not the top.
+                        ForEach(viewModel.queuedItems) { item in
+                            QueuedBubble(item: item) {
+                                Task { await viewModel.cancelQueued(item.id) }
+                            }
+                        }
+                        ForEach(viewModel.offlinePending) { item in
+                            OfflineBubble(text: item.text) {
+                                withAnimation { viewModel.discardOffline(item.id) }
                             }
                         }
                     }
@@ -1038,7 +1041,7 @@ struct QueuedBubble: View {
             VStack(alignment: .trailing, spacing: 4) {
                 HStack(spacing: 5) {
                     Image(systemName: "clock.arrow.circlepath")
-                    Text(item.status == "running" ? "sending" : "queued")
+                    Text(statusLabel)
                         .font(.caption2.weight(.semibold))
                     Button(action: onCancel) {
                         Image(systemName: "xmark.circle.fill")
@@ -1056,5 +1059,19 @@ struct QueuedBubble: View {
                     .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
         }
+    }
+
+    /// Status + wait time: "queued · 2m" — the wait duration tells the user
+    /// how long their prompt has been waiting (server queue depth feedback).
+    private var statusLabel: String {
+        var parts: [String] = []
+        parts.append(item.status == "running" ? "sending" : "queued")
+        if let at = item.queuedAt {
+            let elapsed = Int(Date().timeIntervalSince1970 * 1000 - TimeInterval(at)) / 1000
+            if elapsed >= 60 {
+                parts.append(elapsed >= 3600 ? "\(elapsed / 3600)h" : "\(elapsed / 60)m")
+            }
+        }
+        return parts.joined(separator: " · ")
     }
 }

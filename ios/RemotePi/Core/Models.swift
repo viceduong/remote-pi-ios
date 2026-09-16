@@ -196,6 +196,8 @@ struct TurnResponse: Decodable {
     let accepted: Bool
     let queued: Bool
     let queueItemId: String?
+    /// Server queue depth at accept time (backpressure signal).
+    let queueDepth: Int?
 }
 
 // MARK: - Chat display model
