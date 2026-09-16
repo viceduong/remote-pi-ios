@@ -860,42 +860,27 @@ struct MessageBubble: View {
         )) ?? AttributedString(text))
     }
 
-    /// Neutralize tilde pairs outside code spans so the Markdown parser never
-    /// renders false strikethrough on paths/approximations (`~/x` … `~/y`,
-    /// `costs ~5 s` … `~2.0`, literal `~~` in diffs). Intentional strikethrough
-    /// is rare in coding-agent output; when present it degrades to the literal
-    /// `~~text~~`, which is acceptable and unambiguous.
+    /// Neutralize ALL tildes outside code spans so the Markdown parser never
+    /// renders strikethrough. GFM treats BOTH `~~x~~` and single-tilde `~x~`
+    /// as delimiters — paths (`~/x`), approximations (`~5s`), and diff text
+    /// routinely contain single tildes that pair up across a paragraph.
+    /// Intentional strikethrough is rare in coding-agent output; it degrades
+    /// to the literal `~~text~~`, which is acceptable and unambiguous.
     private static func escapeFalseTildes(_ text: String) -> String {
         guard text.contains("~") else { return text }
         var out = ""
-        out.reserveCapacity(text.count)
+        out.reserveCapacity(text.count + 16)
         var inBackticks = false
-        var i = text.startIndex
-        var tildeRun = 0 // consecutive tildes in current non-code span
-        while i < text.endIndex {
-            let ch = text[i]
+        for ch in text {
             if ch == "`" {
                 inBackticks.toggle()
-                tildeRun = 0
                 out.append(ch)
             } else if ch == "~" && !inBackticks {
-                tildeRun += 1
-                if tildeRun == 2 {
-                    // Escape the pair so GFM strikethrough never triggers.
-                    out.append("\\~\\~")
-                    tildeRun = 0
-                }
+                out.append("\\~")
             } else {
-                if tildeRun > 0 {
-                    // Flush an unpaired tilde literally.
-                    out.append(String(repeating: "~", count: tildeRun))
-                    tildeRun = 0
-                }
                 out.append(ch)
             }
-            i = text.index(after: i)
         }
-        if tildeRun > 0 { out.append(String(repeating: "~", count: tildeRun)) }
         return out
     }
 
