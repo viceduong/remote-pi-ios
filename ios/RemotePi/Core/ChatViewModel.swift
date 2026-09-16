@@ -488,8 +488,18 @@ final class ChatViewModel: ObservableObject {
             }
         case "message_start":
             if let msg = obj["message"] as? [String: Any] {
-                // User prompts are already shown optimistically — skip echoes.
-                if (msg["role"] as? String) == "user" { break }
+                if (msg["role"] as? String) == "user" {
+                    // The queued prompt just went live — drop its chip now.
+                    // (RPC path: file_update never fires for bridge sessions,
+                    // so without this the chip stayed stuck at "queued".)
+                    if let text = msg["text"] as? String, !text.isEmpty {
+                        if let idx = queuedItems.firstIndex(where: { $0.message == text }) {
+                            queuedItems.remove(at: idx)
+                        }
+                        if queuedItems.isEmpty { queuedNote = nil }
+                    }
+                    break
+                }
                 if Self.isToolMessage(msg) { upsertTool(from: msg, finalize: false) }
                 else { upsertAssistant(from: msg, finalize: false) }
             }
@@ -498,7 +508,18 @@ final class ChatViewModel: ObservableObject {
         case "message_end":
             flushPendingDelta()
             if let msg = obj["message"] as? [String: Any] {
-                if (msg["role"] as? String) == "user" { break }
+                if (msg["role"] as? String) == "user" {
+                    // Server echoed the user prompt — replace the optimistic
+                    // copy with the canonical one and drop any matching chip.
+                    if let text = msg["text"] as? String, !text.isEmpty {
+                        if let idx = queuedItems.firstIndex(where: { $0.message == text }) {
+                            queuedItems.remove(at: idx)
+                        }
+                        if queuedItems.isEmpty { queuedNote = nil }
+                        messages.removeAll { $0.role == .user && $0.entryId == nil && $0.text == text && $0.id != (msg["id"] as? String).map { "entry:\($0)" } }
+                    }
+                    break
+                }
                 if Self.isToolMessage(msg) { upsertTool(from: msg, finalize: true) }
                 else { upsertAssistant(from: msg, finalize: true) }
             }
