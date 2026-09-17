@@ -183,7 +183,6 @@ struct ChatView: View {
                 }
                 .coordinateSpace(name: "chatScroll")
                 .overlay(alignment: .bottomTrailing) { scrollOverlayContent(proxy) }
-                .scrollStateModifiers(self, geo: geo, proxy: proxy)
             }
         }
     }
