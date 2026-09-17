@@ -56,21 +56,29 @@ struct ScrollBottomClamp: UIViewRepresentable {
             var attempts = 0
             var lastHeight: CGFloat = -1
             var stablePasses = 0
+            // Watchdog starts only when growth STOPS — a session still
+            // realizing lazy rows (content height growing) keeps the loop
+            // alive regardless of attempt count. This is what fixes the
+            // "very far off bottom" cases: 100 heavy rows can take >8s to
+            // realize, and the old fixed cap abandoned them mid-layout.
+            var idlePasses = 0
             func settle() {
                 clamp()
                 attempts += 1
                 let h = scrollView.contentSize.height
                 if settled() && abs(h - lastHeight) < 0.5 {
                     stablePasses += 1
+                    idlePasses += 1
                     if stablePasses >= 2 {
                         onClamped()
                         return
                     }
                 } else {
                     stablePasses = 0
+                    idlePasses = 0
                 }
                 lastHeight = h
-                if attempts >= 80 {
+                if idlePasses >= 30 || attempts >= 400 {
                     onClamped()
                     return
                 }

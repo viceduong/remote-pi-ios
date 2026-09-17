@@ -200,12 +200,10 @@ struct ChatView: View {
                     let showBtn = distance > 200
                     if showBtn != showScrollToBottom { showScrollToBottom = showBtn }
                     if grew, sessionReady, !isUserScrolling {
-                        DispatchQueue.main.async {
-                            // Anchor the MARKER row (below all content) —
-                            // anchoring the last message row leaves the bottom
-                            // padding + marker below the fold ("near bottom").
-                            proxy.scrollTo("chatBottomMarker", anchor: .bottom)
-                        }
+                        // Re-arm the UIKit clamp (exact absolute bottom via
+                        // adjustedContentInset) — scrollTo(marker) lands a few
+                        // pixels off under keyboard safe-area insets.
+                        didClampInitial = false
                     }
                 }
                 // Follow on new messages (gated: near bottom or keyboard up).
