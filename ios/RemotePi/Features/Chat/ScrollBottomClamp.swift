@@ -54,7 +54,10 @@ struct ScrollBottomClamp: UIViewRepresentable {
                     DispatchQueue.main.async { clamp() }
                 } else {
                     stableCount += 1
-                    if stableCount >= 2, settled() {
+                    let bottom = sv.contentSize.height - sv.bounds.height
+                        + sv.adjustedContentInset.bottom
+                    let atBottom = abs(sv.contentOffset.y - max(0, bottom)) < 1
+                    if stableCount >= 2, atBottom {
                         observation?.invalidate()
                         context.coordinator.done = true
                         onClamped()
