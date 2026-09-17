@@ -9,9 +9,6 @@ import SwiftUI
 /// re-clamp, then stops (no convergence loop, no endless scrolling).
 struct ScrollBottomClamp: UIViewRepresentable {
     var trigger: Bool
-    /// Bump to re-arm the clamp after a wholesale history replacement — the
-    /// coordinator's one-shot flag blocks re-runs within the same view.
-    var generation: Int = 0
     var onClamped: () -> Void = {}
 
     func makeUIView(context: Context) -> UIView {
@@ -19,16 +16,10 @@ struct ScrollBottomClamp: UIViewRepresentable {
         view.backgroundColor = .clear
         view.isUserInteractionEnabled = false
         context.coordinator.view = view
-        Coordinator.active = context.coordinator
         return view
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
-        if context.coordinator.generation != generation {
-            // New history epoch: re-arm.
-            context.coordinator.generation = generation
-            context.coordinator.didClamp = false
-        }
         guard trigger, !context.coordinator.didClamp else { return }
         context.coordinator.didClamp = true
         let coordinator = context.coordinator
@@ -40,63 +31,52 @@ struct ScrollBottomClamp: UIViewRepresentable {
                     CGPoint(x: 0, y: CGFloat.greatestFiniteMagnitude), animated: false)
             }
             clamp()
-            // Event-driven settle: re-clamp whenever contentSize grows (lazy
-            // row realization), stop when height is stable at bottom. KVO —
-            // zero polling, efficient, and it can never be abandoned
-            // mid-layout (the old fixed-attempt loop caused far-off landings).
-            var observation: NSKeyValueObservation?
-            var stableCount = 0
-            var lastHeight: CGFloat = -1
-            observation = scrollView.observe(\.contentSize, options: [.new]) { [weak coordinator] sv, _ in
-                guard let coordinator, !coordinator.stopped, !coordinator.done else { return }
-                let h = sv.contentSize.height
-                if abs(h - lastHeight) > 0.5 {
-                    lastHeight = h
-                    stableCount = 0
-                    DispatchQueue.main.async { clamp() }
-                } else {
-                    stableCount += 1
-                    let bottom = sv.contentSize.height - sv.bounds.height
-                        + sv.adjustedContentInset.bottom
-                    let atBottom = abs(sv.contentOffset.y - max(0, bottom)) < 1
-                    if stableCount >= 2, atBottom {
-                        observation?.invalidate()
-                        context.coordinator.done = true
-                        onClamped()
-                    }
-                }
-            }
-            // Safety: if nothing happens for 3s and we're at bottom, finish.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak scrollView] in
-                guard let scrollView, !context.coordinator.done else { return }
+            // Settle passes for lazy content growth — keep re-clamping until
+            // the scroll view is genuinely at the bottom, then signal ready.
+            // (A fixed 150ms was too early: content kept growing and the user
+            // saw the view still scrolling after the dim lifted.)
+            func settled() -> Bool {
                 let bottom = scrollView.contentSize.height - scrollView.bounds.height
                     + scrollView.adjustedContentInset.bottom
-                if abs(scrollView.contentOffset.y - max(0, bottom)) < 1 {
-                    context.coordinator.done = true
-                    onClamped()
-                }
+                return abs(scrollView.contentOffset.y - max(0, bottom)) < 1
             }
-
+            // Absolute-bottom guarantee: re-clamp until the offset is stable
+            // at the bottom across TWO consecutive passes (content height must
+            // stop growing). Heavy sessions keep realizing lazy rows for
+            // seconds — a fixed attempt count landed mid-content. Bounded at
+            // 40 passes (~4s) with a safety fallback.
+            var attempts = 0
+            var lastHeight: CGFloat = -1
+            var stablePasses = 0
+            func settle() {
+                clamp()
+                attempts += 1
+                let h = scrollView.contentSize.height
+                if settled() && abs(h - lastHeight) < 0.5 {
+                    stablePasses += 1
+                    if stablePasses >= 2 {
+                        onClamped()
+                        return
+                    }
+                } else {
+                    stablePasses = 0
+                }
+                lastHeight = h
+                if attempts >= 40 {
+                    onClamped()
+                    return
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { settle() }
+            }
+            settle()
         }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    /// Called by ChatView when the user starts dragging — stops the KVO
-    /// re-clamp so scrolling up is never fought.
-    static func stopIfActive() {
-        Coordinator.active?.stopped = true
-    }
-
     final class Coordinator {
-        static weak var active: Coordinator?
         weak var view: UIView?
         var didClamp = false
-        var generation = 0
-        var done = false
-        /// Set when the user starts panning — the KVO re-clamp must stop
-        /// fighting the user (it caused flashing + inability to scroll up).
-        var stopped = false
 
         func findScrollView() -> UIScrollView? {
             var s: UIView? = view?.superview

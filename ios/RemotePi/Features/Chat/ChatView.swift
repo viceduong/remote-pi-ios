@@ -1,6 +1,5 @@
 import SwiftUI
 import UIKit
-import Combine
 
 /// Bottom-of-content marker: its maxY in the scroll coordinate space is the
 /// REAL distance signal for auto-follow. Row onAppear/onDisappear flickered
@@ -16,19 +15,17 @@ private struct BottomMarkerKey: PreferenceKey {
 /// chat layout type-checks quickly.
 private struct BottomMarkerAndClamp: View {
     let clampTrigger: Bool
-    let generation: Int
     let onClamped: () -> Void
 
     var body: some View {
         Color.clear.frame(height: 1)
-            .id("chatBottomMarker")
             .background(GeometryReader { g in
                 Color.clear.preference(
                     key: BottomMarkerKey.self,
                     value: g.frame(in: .named("chatScroll")).maxY
                 )
             })
-            .background(ScrollBottomClamp(trigger: clampTrigger, generation: generation, onClamped: onClamped))
+            .background(ScrollBottomClamp(trigger: clampTrigger, onClamped: onClamped))
     }
 }
 
@@ -60,18 +57,6 @@ struct ChatView: View {
     /// flips the offset-based nearBottom to false — without this, the follow
     /// is blocked right after sending (the "jump up" after send).
     @State private var composerFocused = false
-    /// Last bottom-marker Y — growth detection for the absolute-bottom re-pin.
-    @State private var prevMarkerY: CGFloat = 0
-
-    /// Keyboard show/hide as a Bool stream (extracted so the body expression
-    /// stays under the SwiftUI type-checker's complexity limit).
-    private var keyboardEvents: AnyPublisher<Bool, Never> {
-        NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)
-            .map { _ in true }
-            .merge(with: NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)
-                .map { _ in false })
-            .eraseToAnyPublisher()
-    }
     /// Live-refreshed host-ownership state (banner stays current).
     @State private var liveNow = false
     @State private var livePid: Int?
@@ -143,111 +128,23 @@ struct ChatView: View {
         _viewModel = StateObject(wrappedValue: ChatViewModel(client: client, sessionId: session.id))
     }
 
-    @ViewBuilder private var hostBanner: some View {
-        if liveNow {
-            HStack(spacing: 6) {
-                Image(systemName: "terminal")
-                Text("Running in host terminal — external pi process\(livePid.map { " (pid \($0))" } ?? "")")
-                    .font(.caption2)
-                Spacer()
+    var body: some View {
+        VStack(spacing: 0) {
+            if liveNow {
+                HStack(spacing: 6) {
+                    Image(systemName: "terminal")
+                    Text("Running in host terminal — external pi process\(livePid.map { " (pid \($0))" } ?? "")")
+                        .font(.caption2)
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(theme.accent.opacity(0.15))
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(theme.accent.opacity(0.15))
-        }
-    }
-
-    /// Extracted LazyVStack children — keeps `body` under the SwiftUI
-    /// type-checker's complexity limit.
-
-    /// Extracted scroll area (body type-check complexity).
-    private var scrollArea: some View {
-        GeometryReader { geo in
+            GeometryReader { geo in
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 12) {
-                        chatRows
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 12)
-                    .background(BottomMarkerAndClamp(
-                        clampTrigger: !didClampInitial && !viewModel.messages.isEmpty,
-                        generation: viewModel.historyEpoch,
-                        onClamped: {
-                            didClampInitial = true
-                            withAnimation(.easeIn(duration: 0.15)) { sessionReady = true }
-                        }
-                    ))
-                    Color.clear.frame(height: 1)
-                        .background(ScrollPanDetector { active in
-                            isUserScrolling = active
-                            // User grabbed the list — the KVO re-clamp must
-                            // stand down (it was flashing + blocking scroll-up).
-                            if active { ScrollBottomClamp.stopIfActive() }
-                        })
-                        .allowsHitTesting(false)
-                }
-                .coordinateSpace(name: "chatScroll")
-                .overlay(alignment: .bottomTrailing) { scrollOverlayContent(proxy) }
-                // At-bottom measured from the real scroll offset — drives
-                // nearBottom state + scroll-to-bottom button visibility.
-                .onPreferenceChange(BottomMarkerKey.self) { markerY in
-                    let distance = markerY - geo.size.height
-                    // Content grew at the bottom (markdown parse enlarged
-                    // rows) while we were pinned: re-pin. Without this the
-                    // view drifts off-bottom after load as parses complete.
-                    let grew = markerY > prevMarkerY + 1 && prevMarkerY > 0
-                    prevMarkerY = markerY
-                    nearBottom = distance <= 200
-                    viewModel.setViewportNearBottom(nearBottom)
-                    let showBtn = distance > 200
-                    if showBtn != showScrollToBottom { showScrollToBottom = showBtn }
-                    if grew, sessionReady, !isUserScrolling {
-                        // Re-arm the UIKit clamp (exact absolute bottom via
-                        // adjustedContentInset) — scrollTo(marker) lands a few
-                        // pixels off under keyboard safe-area insets.
-                        didClampInitial = false
-                    }
-                }
-                // Follow on new messages (gated: near bottom or keyboard up).
-                .onChange(of: viewModel.messages.count) { _ in
-                    guard (nearBottom || composerFocused), !isUserScrolling else { return }
-                    if !didInitialScroll {
-                        didInitialScroll = true
-                        scrollToBottom(proxy, animated: false)
-                    } else if Date().timeIntervalSince(lastAutoScroll) > 0.25 {
-                        lastAutoScroll = Date()
-                        DispatchQueue.main.async { scrollToBottom(proxy, animated: false) }
-                    }
-                }
-                // Pending chip appeared: keep the view pinned so it's visible.
-                .onChange(of: viewModel.queuedItems.count) { _ in
-                    guard nearBottom || composerFocused, !isUserScrolling else { return }
-                    DispatchQueue.main.async { scrollToBottom(proxy, animated: false) }
-                }
-                // History replaced wholesale: re-arm the clamp + scroll to the
-                // last visible row.
-                .onChange(of: viewModel.historyEpoch) { _ in
-                    // Re-arm the UIKit clamp — it alone lands at absolute
-                    // bottom. No scrollTo here: row anchoring races the clamp
-                    // and left sessions far off-bottom.
-                    didClampInitial = false
-                    didInitialScroll = false
-                }
-                .onChange(of: viewModel.prependAnchor) { anchor in
-                    guard let anchor else { return }
-                    DispatchQueue.main.async {
-                        DispatchQueue.main.async {
-                            proxy.scrollTo(anchor, anchor: .top)
-                            viewModel.consumePrependAnchor()
-                        }
-                    }
-                }
-            }
-        }
-    }
-    @ViewBuilder private var chatRows: some View {
-
                         if viewModel.messages.isEmpty && viewModel.isLoadingHistory {
                             HStack {
                                 ProgressView()
@@ -296,10 +193,30 @@ struct ChatView: View {
                                 withAnimation { viewModel.discardOffline(item.id) }
                             }
                         }
-                    
-    }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 12)
+                    // Bottom marker + reliable open-at-bottom clamp (extracted
+                    // so the type checker isn't overwhelmed).
+                    .background(BottomMarkerAndClamp(
+                        clampTrigger: !didClampInitial && !viewModel.messages.isEmpty,
+                        onClamped: {
+                            didClampInitial = true
+                            // ScrollBottomClamp signals only after the scroll
+                            // view is genuinely at the bottom (lazy growth
+                            // settled) — undim + enable interaction here.
+                            withAnimation(.easeIn(duration: 0.15)) { sessionReady = true }
+                        }
+                    ))
 
-    @ViewBuilder private func scrollOverlayContent(_ proxy: ScrollViewProxy) -> some View {
+                    // Gesture-aware follow: never jump while the user drags.
+                    Color.clear.frame(height: 1)
+                        .background(ScrollPanDetector { active in
+                            isUserScrolling = active
+                        })
+                }
+                .coordinateSpace(name: "chatScroll")
+                .overlay(alignment: .bottomTrailing) {
                     if showScrollToBottom {
                         Button {
                             scrollToBottom(proxy, animated: true)
@@ -315,12 +232,83 @@ struct ChatView: View {
                         .padding(.trailing, 14)
                         .padding(.bottom, 10)
                     }
+                }
+                // At-bottom is measured from the REAL scroll offset (bottom
+                // marker vs viewport height) — immune to LazyVStack row
+                // onAppear/onDisappear flicker, so scrolling up is never yanked
+                // back. Follow: one-shot initial, then throttled 250ms, both
+                // non-animated, only while within 200pt of the bottom.
+                // Marker only updates STATE (nearBottom for the gate + button
+                // visibility) — it must NOT drive scrolling: programmatic
+                // scrolls move the marker, which would self-trigger follow
+                // forever (the infinite-scroll-on-open loop).
+                .onPreferenceChange(BottomMarkerKey.self) { markerY in
+                    let distance = markerY - geo.size.height
+                    nearBottom = distance <= 200
+                    viewModel.setViewportNearBottom(nearBottom)
+                    let showBtn = distance > 200
+                    if showBtn != showScrollToBottom { showScrollToBottom = showBtn }
+                }
+                // Follow fires ONLY on real new messages (count change), gated
+                // by being near the bottom and the user not scrolling. The
+                // one-shot didInitialScroll lands the first page at the bottom.
+                .onChange(of: viewModel.messages.count) { _ in
+                    // composerFocused: the keyboard shrank the viewport, which
+                    // flips nearBottom false even though the user was at the
+                    // bottom when they hit send — keep following.
+                    guard (nearBottom || composerFocused), !isUserScrolling else { return }
+                    if !didInitialScroll {
+                        didInitialScroll = true
+                        scrollToBottom(proxy, animated: false)
+                    } else if Date().timeIntervalSince(lastAutoScroll) > 0.25 {
+                        lastAutoScroll = Date()
+                        // Defer one runloop pass: the row for the new message
+                        // may not be realized yet; scrolling immediately can
+                        // anchor to the previous layout and jump.
+                        DispatchQueue.main.async {
+                            scrollToBottom(proxy, animated: false)
+                        }
                     }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            hostBanner
-            scrollArea
+                }
+                .onChange(of: viewModel.queuedItems.count) { _ in
+                    // A pending chip appeared (send while busy): keep the view
+                    // pinned to the bottom so the chip is visible.
+                    guard nearBottom || composerFocused, !isUserScrolling else { return }
+                    DispatchQueue.main.async {
+                        scrollToBottom(proxy, animated: false)
+                    }
+                }
+                .onChange(of: viewModel.historyEpoch) { _ in
+                    // History was replaced wholesale (initial load or the
+                    // visible-filter refetch). Re-arm the bottom clamp so the
+                    // view lands at absolute bottom on the FINAL content.
+                    // Scroll to the last VISIBLE row — messages.last may be a
+                    // hidden tool row whose id isn't in the list (scrollTo
+                    // would silently no-op and leave the view off-bottom).
+                    didClampInitial = false
+                    didInitialScroll = false
+                    if let last = visibleMessages.last {
+                        DispatchQueue.main.async {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
+                    }
+                }
+                .onChange(of: viewModel.prependAnchor) { anchor in
+                    guard let anchor else { return }
+                    // The stable old-first-row ID remains in the list after a
+                    // prepend. Scroll to it after TWO layout passes so the
+                    // inserted rows are realized — a single async hop races
+                    // LazyVStack layout and lands the viewport at the wrong
+                    // offset (the scroll-up jump).
+                    DispatchQueue.main.async {
+                        DispatchQueue.main.async {
+                            proxy.scrollTo(anchor, anchor: .top)
+                            viewModel.consumePrependAnchor()
+                        }
+                    }
+                }
+            }
+            }
             // Opaque loading cover until history is loaded and the initial
             // bottom clamp settled — prevents jittery jump during load.
             .overlay(
@@ -449,15 +437,6 @@ struct ChatView: View {
         }
         .task { await viewModel.start() }
         .task {
-            // Loading-cover watchdog: never keep the session dimmed/disabled
-            // for more than 6s no matter what (clamp failure, layout stall).
-            try? await Task.sleep(nanoseconds: 6_000_000_000)
-            if !sessionReady {
-                withAnimation(.easeIn(duration: 0.15)) { sessionReady = true }
-            }
-        }
-
-        .task {
             // Keep the host-ownership banner current.
             while !Task.isCancelled {
                 if let summary = try? await client.fetchSession(session.id) {
@@ -467,8 +446,11 @@ struct ChatView: View {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
         }
-        .onReceive(keyboardEvents) { event in
-            composerFocused = event
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            composerFocused = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            composerFocused = false
         }
         .onChange(of: scenePhase) { phase in
             switch phase {
@@ -493,8 +475,6 @@ struct ChatView: View {
             ToolFocusView(item: item)
         }
     }
-
-    /// Extracted scroll-state modifier chain (body type-check complexity).
 
     private var statusDot: some View {
         Circle()
@@ -549,13 +529,14 @@ struct ChatView: View {
             proxy.scrollTo(chip.id, anchor: .bottom)
             return
         }
-        // Absolute bottom = the marker row (below all content + padding).
-        if animated {
-            withAnimation(.easeOut(duration: 0.25)) {
-                proxy.scrollTo("chatBottomMarker", anchor: .bottom)
+        if let last = visibleMessages.last {
+            if animated {
+                withAnimation(.easeOut(duration: 0.25)) {
+                    proxy.scrollTo(last.id, anchor: .bottom)
+                }
+            } else {
+                proxy.scrollTo(last.id, anchor: .bottom)
             }
-        } else {
-            proxy.scrollTo("chatBottomMarker", anchor: .bottom)
         }
     }
 }
