@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Bottom-of-content marker: its maxY in the scroll coordinate space is the
 /// REAL distance signal for auto-follow. Row onAppear/onDisappear flickered
@@ -52,6 +53,10 @@ struct ChatView: View {
     /// True while the user is actively dragging — the follow must never fight
     /// an in-progress pan (that was the bottom stutter).
     @State private var isUserScrolling = false
+    /// Composer focus state. Keyboard appearance shrinks the viewport, which
+    /// flips the offset-based nearBottom to false — without this, the follow
+    /// is blocked right after sending (the "jump up" after send).
+    @State private var composerFocused = false
     /// Live-refreshed host-ownership state (banner stays current).
     @State private var liveNow = false
     @State private var livePid: Int?
@@ -248,7 +253,10 @@ struct ChatView: View {
                 // by being near the bottom and the user not scrolling. The
                 // one-shot didInitialScroll lands the first page at the bottom.
                 .onChange(of: viewModel.messages.count) { _ in
-                    guard nearBottom, !isUserScrolling else { return }
+                    // composerFocused: the keyboard shrank the viewport, which
+                    // flips nearBottom false even though the user was at the
+                    // bottom when they hit send — keep following.
+                    guard (nearBottom || composerFocused), !isUserScrolling else { return }
                     if !didInitialScroll {
                         didInitialScroll = true
                         scrollToBottom(proxy, animated: false)
@@ -260,6 +268,14 @@ struct ChatView: View {
                         DispatchQueue.main.async {
                             scrollToBottom(proxy, animated: false)
                         }
+                    }
+                }
+                .onChange(of: viewModel.queuedItems.count) { _ in
+                    // A pending chip appeared (send while busy): keep the view
+                    // pinned to the bottom so the chip is visible.
+                    guard nearBottom || composerFocused, !isUserScrolling else { return }
+                    DispatchQueue.main.async {
+                        scrollToBottom(proxy, animated: false)
                     }
                 }
                 .onChange(of: viewModel.historyEpoch) { _ in
@@ -429,6 +445,12 @@ struct ChatView: View {
                 }
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            composerFocused = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            composerFocused = false
         }
         .onChange(of: scenePhase) { phase in
             switch phase {
