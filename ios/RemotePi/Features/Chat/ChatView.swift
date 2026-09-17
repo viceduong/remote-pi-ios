@@ -21,6 +21,7 @@ private struct BottomMarkerAndClamp: View {
 
     var body: some View {
         Color.clear.frame(height: 1)
+            .id("chatBottomMarker")
             .background(GeometryReader { g in
                 Color.clear.preference(
                     key: BottomMarkerKey.self,
@@ -200,9 +201,10 @@ struct ChatView: View {
                     if showBtn != showScrollToBottom { showScrollToBottom = showBtn }
                     if grew, sessionReady, !isUserScrolling {
                         DispatchQueue.main.async {
-                            if let last = visibleMessages.last {
-                                proxy.scrollTo(last.id, anchor: .bottom)
-                            }
+                            // Anchor the MARKER row (below all content) —
+                            // anchoring the last message row leaves the bottom
+                            // padding + marker below the fold ("near bottom").
+                            proxy.scrollTo("chatBottomMarker", anchor: .bottom)
                         }
                     }
                 }
@@ -546,14 +548,13 @@ struct ChatView: View {
             proxy.scrollTo(chip.id, anchor: .bottom)
             return
         }
-        if let last = visibleMessages.last {
-            if animated {
-                withAnimation(.easeOut(duration: 0.25)) {
-                    proxy.scrollTo(last.id, anchor: .bottom)
-                }
-            } else {
-                proxy.scrollTo(last.id, anchor: .bottom)
+        // Absolute bottom = the marker row (below all content + padding).
+        if animated {
+            withAnimation(.easeOut(duration: 0.25)) {
+                proxy.scrollTo("chatBottomMarker", anchor: .bottom)
             }
+        } else {
+            proxy.scrollTo("chatBottomMarker", anchor: .bottom)
         }
     }
 }
