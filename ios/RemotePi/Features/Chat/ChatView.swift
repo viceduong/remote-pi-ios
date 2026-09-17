@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Combine
 
 /// Bottom-of-content marker: its maxY in the scroll coordinate space is the
 /// REAL distance signal for auto-follow. Row onAppear/onDisappear flickered
@@ -58,6 +59,16 @@ struct ChatView: View {
     /// flips the offset-based nearBottom to false — without this, the follow
     /// is blocked right after sending (the "jump up" after send).
     @State private var composerFocused = false
+
+    /// Keyboard show/hide as a Bool stream (extracted so the body expression
+    /// stays under the SwiftUI type-checker's complexity limit).
+    private var keyboardEvents: AnyPublisher<Bool, Never> {
+        NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)
+            .map { _ in true }
+            .merge(with: NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)
+                .map { _ in false })
+            .eraseToAnyPublisher()
+    }
     /// Live-refreshed host-ownership state (banner stays current).
     @State private var liveNow = false
     @State private var livePid: Int?
@@ -448,11 +459,8 @@ struct ChatView: View {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
-            composerFocused = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
-            composerFocused = false
+        .onReceive(keyboardEvents) { event in
+            composerFocused = event
         }
         .onChange(of: scenePhase) { phase in
             switch phase {
