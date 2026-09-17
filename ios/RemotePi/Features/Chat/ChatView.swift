@@ -19,20 +19,6 @@ private struct BottomMarkerAndClamp: View {
     let generation: Int
     let onClamped: () -> Void
 
-    @ViewBuilder private var hostBanner: some View {
-        if liveNow {
-            HStack(spacing: 6) {
-                Image(systemName: "terminal")
-                Text("Running in host terminal — external pi process\(livePid.map { " (pid \($0))" } ?? "")")
-                    .font(.caption2)
-                Spacer()
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(theme.accent.opacity(0.15))
-        }
-    }
-
     var body: some View {
         Color.clear.frame(height: 1)
             .background(GeometryReader { g in
@@ -152,6 +138,20 @@ struct ChatView: View {
         _liveNow = State(initialValue: session.live == true)
         _livePid = State(initialValue: session.livePid)
         _viewModel = StateObject(wrappedValue: ChatViewModel(client: client, sessionId: session.id))
+    }
+
+    @ViewBuilder private var hostBanner: some View {
+        if liveNow {
+            HStack(spacing: 6) {
+                Image(systemName: "terminal")
+                Text("Running in host terminal — external pi process\(livePid.map { " (pid \($0))" } ?? "")")
+                    .font(.caption2)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(theme.accent.opacity(0.15))
+        }
     }
 
     var body: some View {
