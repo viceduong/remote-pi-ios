@@ -266,9 +266,12 @@ struct ChatView: View {
                     // History was replaced wholesale (initial load or the
                     // visible-filter refetch). Re-arm the bottom clamp so the
                     // view lands at absolute bottom on the FINAL content.
+                    // Scroll to the last VISIBLE row — messages.last may be a
+                    // hidden tool row whose id isn't in the list (scrollTo
+                    // would silently no-op and leave the view off-bottom).
                     didClampInitial = false
                     didInitialScroll = false
-                    if let last = viewModel.messages.last {
+                    if let last = visibleMessages.last {
                         DispatchQueue.main.async {
                             proxy.scrollTo(last.id, anchor: .bottom)
                         }
