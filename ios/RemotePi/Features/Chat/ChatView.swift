@@ -262,6 +262,18 @@ struct ChatView: View {
                         }
                     }
                 }
+                .onChange(of: viewModel.historyEpoch) { _ in
+                    // History was replaced wholesale (initial load or the
+                    // visible-filter refetch). Re-arm the bottom clamp so the
+                    // view lands at absolute bottom on the FINAL content.
+                    didClampInitial = false
+                    didInitialScroll = false
+                    if let last = viewModel.messages.last {
+                        DispatchQueue.main.async {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
+                    }
+                }
                 .onChange(of: viewModel.prependAnchor) { anchor in
                     guard let anchor else { return }
                     // The stable old-first-row ID remains in the list after a

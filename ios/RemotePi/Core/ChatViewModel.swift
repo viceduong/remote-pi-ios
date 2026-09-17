@@ -25,6 +25,10 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var queuedItems: [QueueItem] = []
     /// Server-owned queued prompts (rendered as pending bubbles — never vanish).
     @Published private(set) var isLoadingHistory = true
+    /// Bumped every time history is (re)loaded wholesale — ChatView re-arms
+    /// the initial bottom clamp on change so a replaced message array always
+    /// lands at absolute bottom.
+    @Published private(set) var historyEpoch = 0
     /// Live "what the assistant is doing" label (Working/Thinking/Running tool…).
     @Published private(set) var workingText: String?
     @Published var errorMessage: String?
@@ -326,6 +330,7 @@ final class ChatViewModel: ObservableObject {
             let page = try await client.fetchMessages(sessionId, limit: 100)
             guard lifecycleActive else { return }
             messages = page.messages
+            historyEpoch += 1
             // History may already contain previously queued prompts — clear stale chips
             reconcileQueued(page.messages)
             if queuedItems.isEmpty { queuedNote = nil }
@@ -353,6 +358,7 @@ final class ChatViewModel: ObservableObject {
                let visible = try? await client.fetchMessages(sessionId, limit: 100, visibleOnly: true),
                !visible.messages.isEmpty {
                 messages = visible.messages
+                historyEpoch += 1
                 hasMore = visible.hasMore
                 lowestFetchedTs = visible.messages.compactMap { $0.timestamp }.min()
                 if let last = visible.messages.last(where: { $0.entryId != nil })?.entryId {

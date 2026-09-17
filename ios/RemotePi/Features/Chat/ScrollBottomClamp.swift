@@ -40,11 +40,29 @@ struct ScrollBottomClamp: UIViewRepresentable {
                     + scrollView.adjustedContentInset.bottom
                 return abs(scrollView.contentOffset.y - max(0, bottom)) < 1
             }
+            // Absolute-bottom guarantee: re-clamp until the offset is stable
+            // at the bottom across TWO consecutive passes (content height must
+            // stop growing). Heavy sessions keep realizing lazy rows for
+            // seconds — a fixed attempt count landed mid-content. Bounded at
+            // 40 passes (~4s) with a safety fallback.
             var attempts = 0
+            var lastHeight: CGFloat = -1
+            var stablePasses = 0
             func settle() {
                 clamp()
                 attempts += 1
-                if settled() || attempts >= 12 {
+                let h = scrollView.contentSize.height
+                if settled() && abs(h - lastHeight) < 0.5 {
+                    stablePasses += 1
+                    if stablePasses >= 2 {
+                        onClamped()
+                        return
+                    }
+                } else {
+                    stablePasses = 0
+                }
+                lastHeight = h
+                if attempts >= 40 {
                     onClamped()
                     return
                 }
