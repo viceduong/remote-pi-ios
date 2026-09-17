@@ -156,6 +156,37 @@ struct ChatView: View {
 
     /// Extracted LazyVStack children — keeps `body` under the SwiftUI
     /// type-checker's complexity limit.
+
+    /// Extracted scroll area (body type-check complexity).
+    private var scrollArea: some View {
+        GeometryReader { geo in
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        chatRows
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 12)
+                    .background(BottomMarkerAndClamp(
+                        generation: viewModel.historyEpoch,
+                        clampTrigger: !didClampInitial && !viewModel.messages.isEmpty,
+                        onClamped: {
+                            didClampInitial = true
+                            withAnimation(.easeIn(duration: 0.15)) { sessionReady = true }
+                        }
+                    ))
+                    Color.clear.frame(height: 1)
+                        .background(ScrollPanDetector { active in
+                            isUserScrolling = active
+                        })
+                        .allowsHitTesting(false)
+                }
+                .coordinateSpace(name: "chatScroll")
+                .overlay(alignment: .bottomTrailing) { scrollOverlayContent(proxy) }
+                .scrollStateModifiers(self, geo: geo, proxy: proxy)
+            }
+        }
+    }
     @ViewBuilder private var chatRows: some View {
 
                         if viewModel.messages.isEmpty && viewModel.isLoadingHistory {
@@ -230,48 +261,7 @@ struct ChatView: View {
     var body: some View {
         VStack(spacing: 0) {
             hostBanner
-            GeometryReader { geo in
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 12) {
-chatRows
-}
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 12)
-                    // Bottom marker + reliable open-at-bottom clamp (extracted
-                    // so the type checker isn't overwhelmed).
-                    .background(BottomMarkerAndClamp(
-                        generation: viewModel.historyEpoch,
-                        clampTrigger: !didClampInitial && !viewModel.messages.isEmpty,
-                        onClamped: {
-                            didClampInitial = true
-                            // ScrollBottomClamp signals only after the scroll
-                            // view is genuinely at the bottom (lazy growth
-                            // settled) — undim + enable interaction here.
-                            withAnimation(.easeIn(duration: 0.15)) { sessionReady = true }
-                        }
-                    ))
-
-                    // Gesture-aware follow: never jump while the user drags.
-                    Color.clear.frame(height: 1)
-                        .background(ScrollPanDetector { active in
-                            isUserScrolling = active
-                        })
-                }
-                .coordinateSpace(name: "chatScroll")
-                .overlay(alignment: .bottomTrailing) { scrollOverlayContent(proxy) }
-                // At-bottom is measured from the REAL scroll offset (bottom
-                // marker vs viewport height) — immune to LazyVStack row
-                // onAppear/onDisappear flicker, so scrolling up is never yanked
-                // back. Follow: one-shot initial, then throttled 250ms, both
-                // non-animated, only while within 200pt of the bottom.
-                // Marker only updates STATE (nearBottom for the gate + button
-                // visibility) — it must NOT drive scrolling: programmatic
-                // scrolls move the marker, which would self-trigger follow
-                // forever (the infinite-scroll-on-open loop).
-                .scrollStateModifiers(self, geo: geo, proxy: proxy)
-            }
-            }
+            scrollArea
             // Opaque loading cover until history is loaded and the initial
             // bottom clamp settled — prevents jittery jump during load.
             .overlay(
