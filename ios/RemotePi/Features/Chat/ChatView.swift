@@ -154,13 +154,10 @@ struct ChatView: View {
         }
     }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            hostBanner
-            GeometryReader { geo in
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 12) {
+    /// Extracted LazyVStack children — keeps `body` under the SwiftUI
+    /// type-checker's complexity limit.
+    @ViewBuilder private var chatRows: some View {
+
                         if viewModel.messages.isEmpty && viewModel.isLoadingHistory {
                             HStack {
                                 ProgressView()
@@ -209,7 +206,18 @@ struct ChatView: View {
                                 withAnimation { viewModel.discardOffline(item.id) }
                             }
                         }
-                    }
+                    
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            hostBanner
+            GeometryReader { geo in
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+chatRows
+}
                     .padding(.horizontal, 12)
                     .padding(.vertical, 12)
                     // Bottom marker + reliable open-at-bottom clamp (extracted
