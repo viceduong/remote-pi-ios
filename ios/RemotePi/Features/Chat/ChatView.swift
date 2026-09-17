@@ -181,6 +181,9 @@ struct ChatView: View {
                     Color.clear.frame(height: 1)
                         .background(ScrollPanDetector { active in
                             isUserScrolling = active
+                            // User grabbed the list — the KVO re-clamp must
+                            // stand down (it was flashing + blocking scroll-up).
+                            if active { ScrollBottomClamp.stopIfActive() }
                         })
                         .allowsHitTesting(false)
                 }

@@ -19,6 +19,7 @@ struct ScrollBottomClamp: UIViewRepresentable {
         view.backgroundColor = .clear
         view.isUserInteractionEnabled = false
         context.coordinator.view = view
+        Coordinator.active = context.coordinator
         return view
     }
 
@@ -46,7 +47,8 @@ struct ScrollBottomClamp: UIViewRepresentable {
             var observation: NSKeyValueObservation?
             var stableCount = 0
             var lastHeight: CGFloat = -1
-            observation = scrollView.observe(\.contentSize, options: [.new]) { sv, _ in
+            observation = scrollView.observe(\.contentSize, options: [.new]) { [weak coordinator] sv, _ in
+                guard let coordinator, !coordinator.stopped, !coordinator.done else { return }
                 let h = sv.contentSize.height
                 if abs(h - lastHeight) > 0.5 {
                     lastHeight = h
@@ -80,11 +82,21 @@ struct ScrollBottomClamp: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
+    /// Called by ChatView when the user starts dragging — stops the KVO
+    /// re-clamp so scrolling up is never fought.
+    static func stopIfActive() {
+        Coordinator.active?.stopped = true
+    }
+
     final class Coordinator {
+        static weak var active: Coordinator?
         weak var view: UIView?
         var didClamp = false
         var generation = 0
         var done = false
+        /// Set when the user starts panning — the KVO re-clamp must stop
+        /// fighting the user (it caused flashing + inability to scroll up).
+        var stopped = false
 
         func findScrollView() -> UIScrollView? {
             var s: UIView? = view?.superview
