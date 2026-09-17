@@ -519,10 +519,16 @@ struct ChatView: View {
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
-        // Anchor to the LAST VISIBLE row id. `proxy.scrollTo` with a stale or
-        // filtered-out id silently no-ops or lands at a wrong offset, which
-        // reads as a random jump when re-renders churn the tail (streaming,
-        // queue chips appearing/disappearing).
+        // Anchor to the true bottom-most row. The list renders, in order:
+        // visibleMessages, queued chips, offline bubbles. The bottom-most row
+        // is an offline bubble, else a queued chip, else the last message.
+        // Scrolling to a row ABOVE the chip left the chip below the fold —
+        // the "not at bottom after send" bug.
+        if viewModel.offlinePending.isEmpty, let chip = viewModel.queuedItems.last {
+            // Chips render after messages; prefer the chip when present.
+            proxy.scrollTo(chip.id, anchor: .bottom)
+            return
+        }
         if let last = visibleMessages.last {
             if animated {
                 withAnimation(.easeOut(duration: 0.25)) {
