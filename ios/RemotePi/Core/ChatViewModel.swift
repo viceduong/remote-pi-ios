@@ -44,6 +44,10 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var liveUsage: SessionUsage?
     /// Session token/cost stats from get_session_stats (pi 0.85).
     @Published private(set) var stats: SessionStats?
+    /// Last-resort blank guard: set when focus mode would render nothing
+    /// (session tail is one huge tool loop). ChatView disables focus mode so
+    /// the tool rows show instead of a blank screen.
+    @Published private(set) var focusModeFallback = false
     /// Locally-queued sends while offline (persisted, flushed on reconnect).
     @Published private(set) var offlinePending: [OfflineMessage] = []
     private var flushingOffline = false
@@ -354,6 +358,12 @@ final class ChatViewModel: ObservableObject {
                 if let last = visible.messages.last(where: { $0.entryId != nil })?.entryId {
                     lastSeenEntryId = last
                 }
+            }
+            // Last-resort blank guard: if the session STILL has no renderable
+            // content in focus mode, surface the tool rows (focus off) so the
+            // user sees the tool loop instead of a blank screen.
+            if Self.hasVisibleContent(messages) == false {
+                focusModeFallback = true
             }
         } catch {
             if isCancellation(error) { return }

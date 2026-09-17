@@ -73,10 +73,13 @@ struct ChatView: View {
 
     private var visibleMessages: [ChatMessage] {
         let msgs = viewModel.messages
-        let sig = "\(msgs.count)|\(msgs.last?.id ?? "")|\(hideTools)"
+        // Blank guard: when the tail is one huge tool loop, focus mode would
+        // render nothing — fall back to showing tool rows.
+        let focus = hideTools && !viewModel.focusModeFallback
+        let sig = "\(msgs.count)|\(msgs.last?.id ?? "")|\(focus)|\(viewModel.focusModeFallback)"
         if sig != cachedSignature {
             cachedSignature = sig
-            cachedVisible = Self.computeVisible(msgs, hideTools: hideTools)
+            cachedVisible = Self.computeVisible(msgs, hideTools: focus)
         }
         return cachedVisible
     }
@@ -159,7 +162,7 @@ struct ChatView: View {
                         }
                         ForEach(Array(visibleMessages.enumerated()), id: \.element.id) { index, message in
                             MessageBubble(message: message, isStreaming: isStreaming(message),
-                                          hideToolCalls: hideTools,
+                                          hideToolCalls: hideTools && !viewModel.focusModeFallback,
                                           onFocus: { item in focusItem = item },
                                           onDiagnose: { diagnose($0) },
                                           onFork: { forkFrom($0) })
