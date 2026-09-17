@@ -39,52 +39,39 @@ struct ScrollBottomClamp: UIViewRepresentable {
                     CGPoint(x: 0, y: CGFloat.greatestFiniteMagnitude), animated: false)
             }
             clamp()
-            // Settle passes for lazy content growth — keep re-clamping until
-            // the scroll view is genuinely at the bottom, then signal ready.
-            // (A fixed 150ms was too early: content kept growing and the user
-            // saw the view still scrolling after the dim lifted.)
-            func settled() -> Bool {
+            // Event-driven settle: re-clamp whenever contentSize grows (lazy
+            // row realization), stop when height is stable at bottom. KVO —
+            // zero polling, efficient, and it can never be abandoned
+            // mid-layout (the old fixed-attempt loop caused far-off landings).
+            var observation: NSKeyValueObservation?
+            var stableCount = 0
+            var lastHeight: CGFloat = -1
+            observation = scrollView.observe(\.contentSize, options: [.new]) { sv, _ in
+                let h = sv.contentSize.height
+                if abs(h - lastHeight) > 0.5 {
+                    lastHeight = h
+                    stableCount = 0
+                    DispatchQueue.main.async { clamp() }
+                } else {
+                    stableCount += 1
+                    if stableCount >= 2, settled() {
+                        observation?.invalidate()
+                        context.coordinator.done = true
+                        onClamped()
+                    }
+                }
+            }
+            // Safety: if nothing happens for 3s and we're at bottom, finish.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak scrollView] in
+                guard let scrollView, !context.coordinator.done else { return }
                 let bottom = scrollView.contentSize.height - scrollView.bounds.height
                     + scrollView.adjustedContentInset.bottom
-                return abs(scrollView.contentOffset.y - max(0, bottom)) < 1
-            }
-            // Absolute-bottom guarantee: re-clamp until the offset is stable
-            // at the bottom across TWO consecutive passes (content height must
-            // stop growing). Heavy sessions keep realizing lazy rows for
-            // seconds — a fixed attempt count landed mid-content. Bounded at
-            // 40 passes (~4s) with a safety fallback.
-            var attempts = 0
-            var lastHeight: CGFloat = -1
-            var stablePasses = 0
-            // Watchdog starts only when growth STOPS — a session still
-            // realizing lazy rows (content height growing) keeps the loop
-            // alive regardless of attempt count. This is what fixes the
-            // "very far off bottom" cases: 100 heavy rows can take >8s to
-            // realize, and the old fixed cap abandoned them mid-layout.
-            var idlePasses = 0
-            func settle() {
-                clamp()
-                attempts += 1
-                let h = scrollView.contentSize.height
-                if settled() && abs(h - lastHeight) < 0.5 {
-                    stablePasses += 1
-                    idlePasses += 1
-                    if stablePasses >= 2 {
-                        onClamped()
-                        return
-                    }
-                } else {
-                    stablePasses = 0
-                    idlePasses = 0
-                }
-                lastHeight = h
-                if idlePasses >= 30 || attempts >= 400 {
+                if abs(scrollView.contentOffset.y - max(0, bottom)) < 1 {
+                    context.coordinator.done = true
                     onClamped()
-                    return
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { settle() }
             }
-            settle()
+
         }
     }
 
@@ -94,6 +81,7 @@ struct ScrollBottomClamp: UIViewRepresentable {
         weak var view: UIView?
         var didClamp = false
         var generation = 0
+        var done = false
 
         func findScrollView() -> UIScrollView? {
             var s: UIView? = view?.superview

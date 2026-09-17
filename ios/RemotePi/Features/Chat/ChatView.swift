@@ -225,11 +225,11 @@ struct ChatView: View {
                 // History replaced wholesale: re-arm the clamp + scroll to the
                 // last visible row.
                 .onChange(of: viewModel.historyEpoch) { _ in
+                    // Re-arm the UIKit clamp — it alone lands at absolute
+                    // bottom. No scrollTo here: row anchoring races the clamp
+                    // and left sessions far off-bottom.
                     didClampInitial = false
                     didInitialScroll = false
-                    if let last = visibleMessages.last {
-                        DispatchQueue.main.async { proxy.scrollTo(last.id, anchor: .bottom) }
-                    }
                 }
                 .onChange(of: viewModel.prependAnchor) { anchor in
                     guard let anchor else { return }
