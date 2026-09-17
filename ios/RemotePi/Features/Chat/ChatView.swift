@@ -269,13 +269,7 @@ chatRows
                 // visibility) — it must NOT drive scrolling: programmatic
                 // scrolls move the marker, which would self-trigger follow
                 // forever (the infinite-scroll-on-open loop).
-                .onPreferenceChange(BottomMarkerKey.self) { markerY in
-                    let distance = markerY - geo.size.height
-                    nearBottom = distance <= 200
-                    viewModel.setViewportNearBottom(nearBottom)
-                    let showBtn = distance > 200
-                    if showBtn != showScrollToBottom { showScrollToBottom = showBtn }
-                }
+                .scrollStateModifiers(self, geo: geo, proxy: proxy)
                 // Follow fires ONLY on real new messages (count change), gated
                 // by being near the bottom and the user not scrolling. The
                 // one-shot didInitialScroll lands the first page at the bottom.
@@ -498,6 +492,16 @@ chatRows
         .fullScreenCover(item: $focusItem) { item in
             ToolFocusView(item: item)
         }
+    }
+
+    /// Extracted scroll-state modifier chain (body type-check complexity).
+    private func scrollStateModifiers(_ base: some View, geo: GeometryProxy, proxy: ScrollViewProxy) -> some View {.onPreferenceChange(BottomMarkerKey.self) { markerY in
+                    let distance = markerY - geo.size.height
+                    nearBottom = distance <= 200
+                    viewModel.setViewportNearBottom(nearBottom)
+                    let showBtn = distance > 200
+                    if showBtn != showScrollToBottom { showScrollToBottom = showBtn }
+                }
     }
 
     private var statusDot: some View {
