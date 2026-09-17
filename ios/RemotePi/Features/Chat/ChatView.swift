@@ -270,7 +270,6 @@ chatRows
                 // scrolls move the marker, which would self-trigger follow
                 // forever (the infinite-scroll-on-open loop).
                 .scrollStateModifiers(self, geo: geo, proxy: proxy)
-                }
             }
             }
             // Opaque loading cover until history is loaded and the initial
