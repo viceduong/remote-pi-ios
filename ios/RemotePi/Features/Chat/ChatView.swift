@@ -59,6 +59,8 @@ struct ChatView: View {
     /// flips the offset-based nearBottom to false — without this, the follow
     /// is blocked right after sending (the "jump up" after send).
     @State private var composerFocused = false
+    /// Last bottom-marker Y — growth detection for the absolute-bottom re-pin.
+    @State private var prevMarkerY: CGFloat = 0
 
     /// Keyboard show/hide as a Bool stream (extracted so the body expression
     /// stays under the SwiftUI type-checker's complexity limit).
@@ -187,10 +189,22 @@ struct ChatView: View {
                 // nearBottom state + scroll-to-bottom button visibility.
                 .onPreferenceChange(BottomMarkerKey.self) { markerY in
                     let distance = markerY - geo.size.height
+                    // Content grew at the bottom (markdown parse enlarged
+                    // rows) while we were pinned: re-pin. Without this the
+                    // view drifts off-bottom after load as parses complete.
+                    let grew = markerY > prevMarkerY + 1 && prevMarkerY > 0
+                    prevMarkerY = markerY
                     nearBottom = distance <= 200
                     viewModel.setViewportNearBottom(nearBottom)
                     let showBtn = distance > 200
                     if showBtn != showScrollToBottom { showScrollToBottom = showBtn }
+                    if grew, sessionReady, !isUserScrolling {
+                        DispatchQueue.main.async {
+                            if let last = visibleMessages.last {
+                                proxy.scrollTo(last.id, anchor: .bottom)
+                            }
+                        }
+                    }
                 }
                 // Follow on new messages (gated: near bottom or keyboard up).
                 .onChange(of: viewModel.messages.count) { _ in
@@ -439,6 +453,7 @@ struct ChatView: View {
                 withAnimation(.easeIn(duration: 0.15)) { sessionReady = true }
             }
         }
+
         .task {
             // Keep the host-ownership banner current.
             while !Task.isCancelled {
