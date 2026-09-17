@@ -270,63 +270,6 @@ chatRows
                 // scrolls move the marker, which would self-trigger follow
                 // forever (the infinite-scroll-on-open loop).
                 .scrollStateModifiers(self, geo: geo, proxy: proxy)
-                // Follow fires ONLY on real new messages (count change), gated
-                // by being near the bottom and the user not scrolling. The
-                // one-shot didInitialScroll lands the first page at the bottom.
-                .onChange(of: viewModel.messages.count) { _ in
-                    // composerFocused: the keyboard shrank the viewport, which
-                    // flips nearBottom false even though the user was at the
-                    // bottom when they hit send — keep following.
-                    guard (nearBottom || composerFocused), !isUserScrolling else { return }
-                    if !didInitialScroll {
-                        didInitialScroll = true
-                        scrollToBottom(proxy, animated: false)
-                    } else if Date().timeIntervalSince(lastAutoScroll) > 0.25 {
-                        lastAutoScroll = Date()
-                        // Defer one runloop pass: the row for the new message
-                        // may not be realized yet; scrolling immediately can
-                        // anchor to the previous layout and jump.
-                        DispatchQueue.main.async {
-                            scrollToBottom(proxy, animated: false)
-                        }
-                    }
-                }
-                .onChange(of: viewModel.queuedItems.count) { _ in
-                    // A pending chip appeared (send while busy): keep the view
-                    // pinned to the bottom so the chip is visible.
-                    guard nearBottom || composerFocused, !isUserScrolling else { return }
-                    DispatchQueue.main.async {
-                        scrollToBottom(proxy, animated: false)
-                    }
-                }
-                .onChange(of: viewModel.historyEpoch) { _ in
-                    // History was replaced wholesale (initial load or the
-                    // visible-filter refetch). Re-arm the bottom clamp so the
-                    // view lands at absolute bottom on the FINAL content.
-                    // Scroll to the last VISIBLE row — messages.last may be a
-                    // hidden tool row whose id isn't in the list (scrollTo
-                    // would silently no-op and leave the view off-bottom).
-                    didClampInitial = false
-                    didInitialScroll = false
-                    if let last = visibleMessages.last {
-                        DispatchQueue.main.async {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        }
-                    }
-                }
-                .onChange(of: viewModel.prependAnchor) { anchor in
-                    guard let anchor else { return }
-                    // The stable old-first-row ID remains in the list after a
-                    // prepend. Scroll to it after TWO layout passes so the
-                    // inserted rows are realized — a single async hop races
-                    // LazyVStack layout and lands the viewport at the wrong
-                    // offset (the scroll-up jump).
-                    DispatchQueue.main.async {
-                        DispatchQueue.main.async {
-                            proxy.scrollTo(anchor, anchor: .top)
-                            viewModel.consumePrependAnchor()
-                        }
-                    }
                 }
             }
             }
@@ -502,6 +445,64 @@ chatRows
                     let showBtn = distance > 200
                     if showBtn != showScrollToBottom { showScrollToBottom = showBtn }
                 }
+                // Follow fires ONLY on real new messages (count change), gated
+                // by being near the bottom and the user not scrolling. The
+                // one-shot didInitialScroll lands the first page at the bottom.
+                .onChange(of: viewModel.messages.count) { _ in
+                    // composerFocused: the keyboard shrank the viewport, which
+                    // flips nearBottom false even though the user was at the
+                    // bottom when they hit send — keep following.
+                    guard (nearBottom || composerFocused), !isUserScrolling else { return }
+                    if !didInitialScroll {
+                        didInitialScroll = true
+                        scrollToBottom(proxy, animated: false)
+                    } else if Date().timeIntervalSince(lastAutoScroll) > 0.25 {
+                        lastAutoScroll = Date()
+                        // Defer one runloop pass: the row for the new message
+                        // may not be realized yet; scrolling immediately can
+                        // anchor to the previous layout and jump.
+                        DispatchQueue.main.async {
+                            scrollToBottom(proxy, animated: false)
+                        }
+                    }
+                }
+                .onChange(of: viewModel.queuedItems.count) { _ in
+                    // A pending chip appeared (send while busy): keep the view
+                    // pinned to the bottom so the chip is visible.
+                    guard nearBottom || composerFocused, !isUserScrolling else { return }
+                    DispatchQueue.main.async {
+                        scrollToBottom(proxy, animated: false)
+                    }
+                }
+                .onChange(of: viewModel.historyEpoch) { _ in
+                    // History was replaced wholesale (initial load or the
+                    // visible-filter refetch). Re-arm the bottom clamp so the
+                    // view lands at absolute bottom on the FINAL content.
+                    // Scroll to the last VISIBLE row — messages.last may be a
+                    // hidden tool row whose id isn't in the list (scrollTo
+                    // would silently no-op and leave the view off-bottom).
+                    didClampInitial = false
+                    didInitialScroll = false
+                    if let last = visibleMessages.last {
+                        DispatchQueue.main.async {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
+                    }
+                }
+                .onChange(of: viewModel.prependAnchor) { anchor in
+                    guard let anchor else { return }
+                    // The stable old-first-row ID remains in the list after a
+                    // prepend. Scroll to it after TWO layout passes so the
+                    // inserted rows are realized — a single async hop races
+                    // LazyVStack layout and lands the viewport at the wrong
+                    // offset (the scroll-up jump).
+                    DispatchQueue.main.async {
+                        DispatchQueue.main.async {
+                            proxy.scrollTo(anchor, anchor: .top)
+                            viewModel.consumePrependAnchor()
+                        }
+                    }
+
     }
 
     private var statusDot: some View {
