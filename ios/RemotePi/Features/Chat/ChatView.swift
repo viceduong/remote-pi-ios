@@ -209,6 +209,24 @@ struct ChatView: View {
                     
     }
 
+    @ViewBuilder private func scrollOverlayContent(_ proxy: ScrollViewProxy) -> some View {
+                    if showScrollToBottom {
+                        Button {
+                            scrollToBottom(proxy, animated: true)
+                        } label: {
+                            Image(systemName: "arrow.down")
+                                .font(.system(size: 16, weight: .semibold))
+                                .frame(width: 38, height: 38)
+                                .background(theme.secondaryBackground.opacity(0.95))
+                                .clipShape(Circle())
+                                .overlay(Circle().stroke(theme.border, lineWidth: 0.5))
+                                .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
+                        }
+                        .padding(.trailing, 14)
+                        .padding(.bottom, 10)
+                    }
+                    }
+
     var body: some View {
         VStack(spacing: 0) {
             hostBanner
@@ -241,23 +259,7 @@ chatRows
                         })
                 }
                 .coordinateSpace(name: "chatScroll")
-                .overlay(alignment: .bottomTrailing) {
-                    if showScrollToBottom {
-                        Button {
-                            scrollToBottom(proxy, animated: true)
-                        } label: {
-                            Image(systemName: "arrow.down")
-                                .font(.system(size: 16, weight: .semibold))
-                                .frame(width: 38, height: 38)
-                                .background(theme.secondaryBackground.opacity(0.95))
-                                .clipShape(Circle())
-                                .overlay(Circle().stroke(theme.border, lineWidth: 0.5))
-                                .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
-                        }
-                        .padding(.trailing, 14)
-                        .padding(.bottom, 10)
-                    }
-                }
+                .overlay(alignment: .bottomTrailing) { scrollOverlayContent(proxy) }
                 // At-bottom is measured from the REAL scroll offset (bottom
                 // marker vs viewport height) — immune to LazyVStack row
                 // onAppear/onDisappear flicker, so scrolling up is never yanked
