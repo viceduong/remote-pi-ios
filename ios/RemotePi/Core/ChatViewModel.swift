@@ -341,20 +341,19 @@ final class ChatViewModel: ObservableObject {
                 lastSeenEntryId = last
             }
             // Blank-page guard: a session tail that is one long tool loop can
-            // be 100% hidden in focus mode (all empty tool-call assistants +
-            // tool outputs). Keep fetching older pages until something is
-            // visible (bounded) so the session never opens blank.
-            var guardPages = 0
-            while hasMore, guardPages < 10,
-                  Self.hasVisibleContent(messages) == false {
-                guardPages += 1
-                guard let earliest = messages.compactMap({ $0.timestamp }).min() else { break }
-                if let more = try? await client.fetchMessages(sessionId, limit: 100, before: earliest),
-                   !more.messages.isEmpty {
-                    messages.insert(contentsOf: more.messages, at: 0)
-                    hasMore = more.hasMore
-                    lowestFetchedTs = more.messages.compactMap { $0.timestamp }.min() ?? lowestFetchedTs
-                } else { break }
+            // be 100% hidden in focus mode (thousands of empty tool-call
+            // assistants + tool outputs). The server's ?visible=1 filter
+            // returns the newest RENDERABLE rows in one call — refetch with
+            // it when the initial page is all-hidden.
+            if Self.hasVisibleContent(messages) == false, hasMore,
+               let visible = try? await client.fetchMessages(sessionId, limit: 100, visibleOnly: true),
+               !visible.messages.isEmpty {
+                messages = visible.messages
+                hasMore = visible.hasMore
+                lowestFetchedTs = visible.messages.compactMap { $0.timestamp }.min()
+                if let last = visible.messages.last(where: { $0.entryId != nil })?.entryId {
+                    lastSeenEntryId = last
+                }
             }
         } catch {
             if isCancellation(error) { return }

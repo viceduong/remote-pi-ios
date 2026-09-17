@@ -155,7 +155,7 @@ struct APIClient {
     }
 
     /// GET /api/sessions/:id/messages — last N messages, paginated with `before`.
-    func fetchMessages(_ id: String, limit: Int = 100, before: Int? = nil, since: String? = nil) async throws -> (messages: [ChatMessage], hasMore: Bool, total: Int, pending: [String], working: Bool) {
+    func fetchMessages(_ id: String, limit: Int = 100, before: Int? = nil, since: String? = nil, visibleOnly: Bool = false) async throws -> (messages: [ChatMessage], hasMore: Bool, total: Int, pending: [String], working: Bool) {
         struct Pending: Decodable { let text: String }
         struct Wrapper: Decodable {
             let messages: [WireMessage]
@@ -167,6 +167,7 @@ struct APIClient {
         var query = "?limit=\(limit)"
         if let before { query += "&before=\(before)" }
         if let since { query += "&since=\(since)" }
+        if visibleOnly { query += "&visible=1" }
         let wrapper: Wrapper = try await get("/api/sessions/\(id)/messages\(query)")
         return (wrapper.messages.map { $0.toChatMessage() }, wrapper.hasMore ?? false,
                 wrapper.total ?? 0, wrapper.pending?.map(\.text) ?? [], wrapper.working ?? false)
