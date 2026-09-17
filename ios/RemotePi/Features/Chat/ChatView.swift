@@ -183,6 +183,49 @@ struct ChatView: View {
                 }
                 .coordinateSpace(name: "chatScroll")
                 .overlay(alignment: .bottomTrailing) { scrollOverlayContent(proxy) }
+                // At-bottom measured from the real scroll offset — drives
+                // nearBottom state + scroll-to-bottom button visibility.
+                .onPreferenceChange(BottomMarkerKey.self) { markerY in
+                    let distance = markerY - geo.size.height
+                    nearBottom = distance <= 200
+                    viewModel.setViewportNearBottom(nearBottom)
+                    let showBtn = distance > 200
+                    if showBtn != showScrollToBottom { showScrollToBottom = showBtn }
+                }
+                // Follow on new messages (gated: near bottom or keyboard up).
+                .onChange(of: viewModel.messages.count) { _ in
+                    guard (nearBottom || composerFocused), !isUserScrolling else { return }
+                    if !didInitialScroll {
+                        didInitialScroll = true
+                        scrollToBottom(proxy, animated: false)
+                    } else if Date().timeIntervalSince(lastAutoScroll) > 0.25 {
+                        lastAutoScroll = Date()
+                        DispatchQueue.main.async { scrollToBottom(proxy, animated: false) }
+                    }
+                }
+                // Pending chip appeared: keep the view pinned so it's visible.
+                .onChange(of: viewModel.queuedItems.count) { _ in
+                    guard nearBottom || composerFocused, !isUserScrolling else { return }
+                    DispatchQueue.main.async { scrollToBottom(proxy, animated: false) }
+                }
+                // History replaced wholesale: re-arm the clamp + scroll to the
+                // last visible row.
+                .onChange(of: viewModel.historyEpoch) { _ in
+                    didClampInitial = false
+                    didInitialScroll = false
+                    if let last = visibleMessages.last {
+                        DispatchQueue.main.async { proxy.scrollTo(last.id, anchor: .bottom) }
+                    }
+                }
+                .onChange(of: viewModel.prependAnchor) { anchor in
+                    guard let anchor else { return }
+                    DispatchQueue.main.async {
+                        DispatchQueue.main.async {
+                            proxy.scrollTo(anchor, anchor: .top)
+                            viewModel.consumePrependAnchor()
+                        }
+                    }
+                }
             }
         }
     }
@@ -388,6 +431,14 @@ struct ChatView: View {
             }
         }
         .task { await viewModel.start() }
+        .task {
+            // Loading-cover watchdog: never keep the session dimmed/disabled
+            // for more than 6s no matter what (clamp failure, layout stall).
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            if !sessionReady {
+                withAnimation(.easeIn(duration: 0.15)) { sessionReady = true }
+            }
+        }
         .task {
             // Keep the host-ownership banner current.
             while !Task.isCancelled {
