@@ -437,7 +437,9 @@ chatRows
     }
 
     /// Extracted scroll-state modifier chain (body type-check complexity).
-    private func scrollStateModifiers(_ base: some View, geo: GeometryProxy, proxy: ScrollViewProxy) -> some View {.onPreferenceChange(BottomMarkerKey.self) { markerY in
+    private func scrollStateModifiers(_ base: some View, geo: GeometryProxy, proxy: ScrollViewProxy) -> some View {
+        base
+            .onPreferenceChange(BottomMarkerKey.self) { markerY in
                     let distance = markerY - geo.size.height
                     nearBottom = distance <= 200
                     viewModel.setViewportNearBottom(nearBottom)
@@ -502,6 +504,7 @@ chatRows
                         }
                     }
 
+                 }
     }
 
     private var statusDot: some View {
