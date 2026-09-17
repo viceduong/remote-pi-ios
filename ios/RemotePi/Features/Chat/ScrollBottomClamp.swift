@@ -70,7 +70,7 @@ struct ScrollBottomClamp: UIViewRepresentable {
                     stablePasses = 0
                 }
                 lastHeight = h
-                if attempts >= 40 {
+                if attempts >= 80 {
                     onClamped()
                     return
                 }
