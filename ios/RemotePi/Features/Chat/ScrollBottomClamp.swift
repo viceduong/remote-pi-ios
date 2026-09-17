@@ -9,6 +9,9 @@ import SwiftUI
 /// re-clamp, then stops (no convergence loop, no endless scrolling).
 struct ScrollBottomClamp: UIViewRepresentable {
     var trigger: Bool
+    /// Bump to re-arm the clamp after a wholesale history replacement — the
+    /// coordinator's one-shot flag blocks re-runs within the same view.
+    var generation: Int = 0
     var onClamped: () -> Void = {}
 
     func makeUIView(context: Context) -> UIView {
@@ -20,6 +23,11 @@ struct ScrollBottomClamp: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
+        if context.coordinator.generation != generation {
+            // New history epoch: re-arm.
+            context.coordinator.generation = generation
+            context.coordinator.didClamp = false
+        }
         guard trigger, !context.coordinator.didClamp else { return }
         context.coordinator.didClamp = true
         let coordinator = context.coordinator
@@ -77,6 +85,7 @@ struct ScrollBottomClamp: UIViewRepresentable {
     final class Coordinator {
         weak var view: UIView?
         var didClamp = false
+        var generation = 0
 
         func findScrollView() -> UIScrollView? {
             var s: UIView? = view?.superview
