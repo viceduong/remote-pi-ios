@@ -838,8 +838,7 @@ struct MessageBubble: View {
                 if toolCollapsed && !toolExpanded {
                     // Collapsed: one-line preview of the output (first line).
                     let preview = message.text
-                        .split(separator: "
-", omittingEmptySubsequences: true)
+                        .split(separator: "\n", omittingEmptySubsequences: true)
                         .first.map(String.init) ?? ""
                     if !preview.isEmpty {
                         Text(preview)
