@@ -96,8 +96,10 @@ struct ChatView: View {
     private static func computeVisible(_ messages: [ChatMessage], hideTools: Bool, hideThinking: Bool) -> [ChatMessage] {
         let base: [ChatMessage]
         if hideTools {
+            // pi-style: tool rows STAY (rendered as collapsed headers by
+            // MessageBubble), system notes drop, thinking optionally hidden.
             base = messages
-                .filter { $0.role != .tool && !$0.isSystemNote }
+                .filter { !$0.isSystemNote }
                 .map { msg in
                     guard msg.thinking != nil, hideThinking else { return msg }
                     var m = msg
@@ -172,6 +174,7 @@ struct ChatView: View {
                         ForEach(Array(visibleMessages.enumerated()), id: \.element.id) { index, message in
                             MessageBubble(message: message, isStreaming: isStreaming(message),
                                           hideToolCalls: hideTools && !viewModel.focusModeFallback,
+                                          toolCollapsed: hideTools && !viewModel.focusModeFallback,
                                           onFocus: { item in focusItem = item },
                                           onDiagnose: { diagnose($0) },
                                           onFork: { forkFrom($0) })
@@ -552,6 +555,10 @@ struct MessageBubble: View {
     let message: ChatMessage
     let isStreaming: Bool
     var hideToolCalls = false
+    /// pi-style focus mode: tool output collapsed to a one-line header,
+    /// expandable per message.
+    var toolCollapsed = false
+    @State private var toolExpanded = false
     var onFocus: (ToolFocusItem) -> Void = { _ in }
     var onDiagnose: (ChatMessage) -> Void = { _ in }
     var onFork: (ChatMessage) -> Void = { _ in }
@@ -828,7 +835,27 @@ struct MessageBubble: View {
                             .foregroundColor(.secondary)
                     }
                 }
-                if !message.text.isEmpty {
+                if toolCollapsed && !toolExpanded {
+                    // Collapsed: one-line preview of the output (first line).
+                    let preview = message.text
+                        .split(separator: "
+", omittingEmptySubsequences: true)
+                        .first.map(String.init) ?? ""
+                    if !preview.isEmpty {
+                        Text(preview)
+                            .font(.system(size: scaled(11), design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    Button {
+                        withAnimation(.easeOut(duration: 0.15)) { toolExpanded = true }
+                    } label: {
+                        Label("Show output", systemImage: "chevron.down")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundColor(theme.accent)
+                    }
+                } else if !message.text.isEmpty {
                     if isStreaming {
                         Text(message.text)
                             .font(.system(size: scaled(11), design: .monospaced))
