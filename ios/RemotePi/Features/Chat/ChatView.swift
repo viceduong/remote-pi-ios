@@ -67,11 +67,7 @@ struct ChatView: View {
     @Environment(\.presentationMode) private var presentationMode
     @Environment(\.scenePhase) private var scenePhase
     /// Focus mode (default ON): hides tool output, calls, notes AND thinking.
-    /// pi-style display modes: thinking (default, tools collapsed + thinking),
-    /// no-thinking (tools collapsed, thinking hidden), full (everything).
-    @AppStorage("displayMode") private var displayModeRaw: String = "thinking"
-    var displayMode: String { displayModeRaw }
-    var hideTools: Bool { displayModeRaw != "full" }
+    @AppStorage("hideToolsEnabled") private var hideTools = true
 
     /// Cached visible list — recomputed only when messages or focus mode
     /// change. `visibleMessages` used to be a computed property doing full
@@ -88,20 +84,18 @@ struct ChatView: View {
         let sig = "\(msgs.count)|\(msgs.last?.id ?? "")|\(focus)|\(viewModel.focusModeFallback)"
         if sig != cachedSignature {
             cachedSignature = sig
-            cachedVisible = Self.computeVisible(msgs, hideTools: focus, hideThinking: displayModeRaw == "no-thinking")
+            cachedVisible = Self.computeVisible(msgs, hideTools: focus)
         }
         return cachedVisible
     }
 
-    private static func computeVisible(_ messages: [ChatMessage], hideTools: Bool, hideThinking: Bool) -> [ChatMessage] {
+    private static func computeVisible(_ messages: [ChatMessage], hideTools: Bool) -> [ChatMessage] {
         let base: [ChatMessage]
         if hideTools {
-            // pi-style: tool rows STAY (rendered as collapsed headers by
-            // MessageBubble), system notes drop, thinking optionally hidden.
             base = messages
-                .filter { !$0.isSystemNote }
+                .filter { $0.role != .tool && !$0.isSystemNote }
                 .map { msg in
-                    guard msg.thinking != nil, hideThinking else { return msg }
+                    guard msg.thinking != nil else { return msg }
                     var m = msg
                     m.thinking = nil
                     return m
@@ -151,7 +145,54 @@ struct ChatView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 12) {
-                        chatRows
+                        if viewModel.messages.isEmpty && viewModel.isLoadingHistory {
+                            HStack {
+                                ProgressView()
+                                Text("Loading messages…")
+                                    .font(.caption)
+                                    .foregroundColor(theme.secondaryText)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 40)
+                        }
+                        if hideTools && !viewModel.messages.isEmpty && viewModel.messages.contains(where: { $0.role == .tool || $0.isSystemNote }) {
+                            Button {
+                                withAnimation { hideTools = false }
+                            } label: {
+                                Label("Tool output, thinking & notes hidden — tap to show", systemImage: "hammer")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                        ForEach(Array(visibleMessages.enumerated()), id: \.element.id) { index, message in
+                            MessageBubble(message: message, isStreaming: isStreaming(message),
+                                          hideToolCalls: hideTools && !viewModel.focusModeFallback,
+                                          onFocus: { item in focusItem = item },
+                                          onDiagnose: { diagnose($0) },
+                                          onFork: { forkFrom($0) })
+                            .id(message.id)
+                            .onAppear {
+                                // Prefetch the previous page before the user
+                                // reaches the very top (smooth pagination).
+                                if index < 8 {
+                                    Task { await viewModel.loadMore() }
+                                }
+                            }
+                        }
+                        // Queued + offline bubbles render AFTER messages —
+                        // they are the newest pending content and belong at
+                        // the bottom (above the composer), not the top.
+                        ForEach(viewModel.queuedItems) { item in
+                            QueuedBubble(item: item) {
+                                Task { await viewModel.cancelQueued(item.id) }
+                            }
+                        }
+                        ForEach(viewModel.offlinePending) { item in
+                            OfflineBubble(text: item.text) {
+                                withAnimation { viewModel.discardOffline(item.id) }
+                            }
+                        }
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 12)
@@ -376,12 +417,10 @@ struct ChatView: View {
                         Image(systemName: "ellipsis.circle")
                     }
                     Button {
-                        withAnimation {
-                            displayModeRaw = displayModeRaw == "thinking" ? "no-thinking" : (displayModeRaw == "no-thinking" ? "full" : "thinking")
-                        }
+                        withAnimation { hideTools.toggle() }
                     } label: {
-                        Image(systemName: displayModeRaw == "full" ? "hammer.fill" : "hammer")
-                            .foregroundColor(displayModeRaw == "full" ? .green : (displayModeRaw == "no-thinking" ? .orange : .secondary))
+                        Image(systemName: hideTools ? "hammer" : "hammer.circle")
+                            .foregroundColor(hideTools ? .orange : .secondary)
                     }
                     if viewModel.isStreaming {
                         Button {
@@ -479,59 +518,6 @@ struct ChatView: View {
         }
     }
 
-    /// Extracted LazyVStack children (body type-check complexity).
-    @ViewBuilder private var chatRows: some View {
-                            if viewModel.messages.isEmpty && viewModel.isLoadingHistory {
-                                HStack {
-                                    ProgressView()
-                                    Text("Loading messages…")
-                                        .font(.caption)
-                                        .foregroundColor(theme.secondaryText)
-                                }
-                                .frame(maxWidth: .infinity)
-                                .padding(.top, 40)
-                            }
-                            if hideTools && !viewModel.messages.isEmpty && viewModel.messages.contains(where: { $0.role == .tool || $0.isSystemNote }) {
-                                Button {
-                                    withAnimation { displayModeRaw = "thinking" }
-                                } label: {
-                                    Label("Tool output, thinking & notes hidden — tap to show", systemImage: "hammer")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                                .padding(.vertical, 4)
-                            }
-                            ForEach(Array(visibleMessages.enumerated()), id: \.element.id) { index, message in
-                                MessageBubble(message: message, isStreaming: isStreaming(message),
-                                              hideToolCalls: hideTools && !viewModel.focusModeFallback,
-                                              toolCollapsed: hideTools && !viewModel.focusModeFallback,
-                                              onFocus: { item in focusItem = item },
-                                              onDiagnose: { diagnose($0) },
-                                              onFork: { forkFrom($0) })
-                                .id(message.id)
-                                .onAppear {
-                                    // Prefetch the previous page before the user
-                                    // reaches the very top (smooth pagination).
-                                    if index < 8 {
-                                        Task { await viewModel.loadMore() }
-                                    }
-                                }
-                            }
-                            // Queued + offline bubbles render AFTER messages —
-                            // they are the newest pending content and belong at
-                            // the bottom (above the composer), not the top.
-                            ForEach(viewModel.queuedItems) { item in
-                                QueuedBubble(item: item) {
-                                    Task { await viewModel.cancelQueued(item.id) }
-                                }
-                            }
-                            ForEach(viewModel.offlinePending) { item in
-                                OfflineBubble(text: item.text) {
-                                    withAnimation { viewModel.discardOffline(item.id) }
-                                }
-                            }
-    }
-
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
         // Anchor to the true bottom-most row. The list renders, in order:
         // visibleMessages, queued chips, offline bubbles. The bottom-most row
@@ -560,10 +546,6 @@ struct MessageBubble: View {
     let message: ChatMessage
     let isStreaming: Bool
     var hideToolCalls = false
-    /// pi-style focus mode: tool output collapsed to a one-line header,
-    /// expandable per message.
-    var toolCollapsed = false
-    @State private var toolExpanded = false
     var onFocus: (ToolFocusItem) -> Void = { _ in }
     var onDiagnose: (ChatMessage) -> Void = { _ in }
     var onFork: (ChatMessage) -> Void = { _ in }
@@ -578,14 +560,13 @@ struct MessageBubble: View {
 
     private func scaled(_ base: CGFloat) -> CGFloat { base * CGFloat(textScale) }
 
-    init(message: ChatMessage, isStreaming: Bool, hideToolCalls: Bool = false, toolCollapsed: Bool = false,
+    init(message: ChatMessage, isStreaming: Bool, hideToolCalls: Bool = false,
          onFocus: @escaping (ToolFocusItem) -> Void = { _ in },
          onDiagnose: @escaping (ChatMessage) -> Void = { _ in },
          onFork: @escaping (ChatMessage) -> Void = { _ in }) {
         self.message = message
         self.isStreaming = isStreaming
         self.hideToolCalls = hideToolCalls
-        self.toolCollapsed = toolCollapsed
         self.onFocus = onFocus
         self.onDiagnose = onDiagnose
         self.onFork = onFork
@@ -841,26 +822,7 @@ struct MessageBubble: View {
                             .foregroundColor(.secondary)
                     }
                 }
-                if toolCollapsed && !toolExpanded {
-                    // Collapsed: one-line preview of the output (first line).
-                    let preview = message.text
-                        .split(separator: "\n", omittingEmptySubsequences: true)
-                        .first.map(String.init) ?? ""
-                    if !preview.isEmpty {
-                        Text(preview)
-                            .font(.system(size: scaled(11), design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    Button {
-                        withAnimation(.easeOut(duration: 0.15)) { toolExpanded = true }
-                    } label: {
-                        Label("Show output", systemImage: "chevron.down")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundColor(theme.accent)
-                    }
-                } else if !message.text.isEmpty {
+                if !message.text.isEmpty {
                     if isStreaming {
                         Text(message.text)
                             .font(.system(size: scaled(11), design: .monospaced))
