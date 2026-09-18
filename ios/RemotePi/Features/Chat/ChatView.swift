@@ -67,21 +67,11 @@ struct ChatView: View {
     @Environment(\.presentationMode) private var presentationMode
     @Environment(\.scenePhase) private var scenePhase
     /// Focus mode (default ON): hides tool output, calls, notes AND thinking.
-    /// pi-style display modes, cycled with the toolbar hammer button:
-    /// - thinking (default): tool output collapsed to headers, thinking visible
-    /// - no-thinking: tool output collapsed, thinking hidden
-    /// - full: full tool output + thinking
-    enum DisplayMode: String {
-        case thinking, noThinking = "no-thinking", full
-    }
-    @AppStorage("displayMode") private var displayModeRaw: String = DisplayMode.thinking.rawValue
-    var displayMode: DisplayMode {
-        get { DisplayMode(rawValue: displayModeRaw) ?? .thinking }
-        set { displayModeRaw = newValue.rawValue }
-    }
-    /// Legacy flag kept for the existing rendering paths: true when tools are
-    /// collapsed (thinking + no-thinking modes).
-    var hideTools: Bool { displayMode != .full }
+    /// pi-style display modes: thinking (default, tools collapsed + thinking),
+    /// no-thinking (tools collapsed, thinking hidden), full (everything).
+    @AppStorage("displayMode") private var displayModeRaw: String = "thinking"
+    var displayMode: String { displayModeRaw }
+    var hideTools: Bool { displayModeRaw != "full" }
 
     /// Cached visible list — recomputed only when messages or focus mode
     /// change. `visibleMessages` used to be a computed property doing full
@@ -95,11 +85,10 @@ struct ChatView: View {
         // Blank guard: when the tail is one huge tool loop, focus mode would
         // render nothing — fall back to showing tool rows.
         let focus = hideTools && !viewModel.focusModeFallback
-        let hideThinking = displayMode == .noThinking
-        let sig = "\(msgs.count)|\(msgs.last?.id ?? "")|\(focus)|\(hideThinking)|\(viewModel.focusModeFallback)"
+        let sig = "\(msgs.count)|\(msgs.last?.id ?? "")|\(focus)|\(viewModel.focusModeFallback)"
         if sig != cachedSignature {
             cachedSignature = sig
-            cachedVisible = Self.computeVisible(msgs, hideTools: focus, hideThinking: hideThinking)
+            cachedVisible = Self.computeVisible(msgs, hideTools: focus, hideThinking: displayModeRaw == "no-thinking")
         }
         return cachedVisible
     }
@@ -172,7 +161,7 @@ struct ChatView: View {
                         }
                         if hideTools && !viewModel.messages.isEmpty && viewModel.messages.contains(where: { $0.role == .tool || $0.isSystemNote }) {
                             Button {
-                                withAnimation { displayMode = .full }
+                                withAnimation { displayModeRaw = "thinking" }
                             } label: {
                                 Label("Tool output, thinking & notes hidden — tap to show", systemImage: "hammer")
                                     .font(.caption)
@@ -420,8 +409,60 @@ struct ChatView: View {
         .navigationTitle(session.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) { chatToolbarContent }
-        ive, .background:
+            ToolbarItem(placement: .navigationBarTrailing) {
+                HStack(spacing: 12) {
+                    Menu {
+                        Button {
+                            forkFrom(nil)
+                        } label: {
+                            Label("Fork at latest message", systemImage: "arrow.branch")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    Button {
+                        withAnimation {
+                            displayModeRaw = displayModeRaw == "thinking" ? "no-thinking" : (displayModeRaw == "no-thinking" ? "full" : "thinking")
+                        }
+                    } label: {
+                        Image(systemName: displayModeRaw == "full" ? "hammer.fill" : "hammer")
+                            .foregroundColor(displayModeRaw == "full" ? .green : (displayModeRaw == "no-thinking" ? .orange : .secondary))
+                    }
+                    if viewModel.isStreaming {
+                        Button {
+                            Task { await viewModel.abort() }
+                        } label: {
+                            Image(systemName: "stop.circle")
+                                .foregroundColor(.red)
+                        }
+                    } else {
+                        statusDot
+                    }
+                }
+            }
+        }
+        .task { await viewModel.start() }
+        .task {
+            // Keep the host-ownership banner current.
+            while !Task.isCancelled {
+                if let summary = try? await client.fetchSession(session.id) {
+                    liveNow = summary.live == true
+                    livePid = summary.livePid
+                }
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            composerFocused = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            composerFocused = false
+        }
+        .onChange(of: scenePhase) { phase in
+            switch phase {
+            case .active:
+                viewModel.resumeNetwork()
+            case .inactive, .background:
                 viewModel.suspendNetwork()
             @unknown default:
                 break
@@ -481,64 +522,6 @@ struct ChatView: View {
                 viewModel.errorMessage = error.localizedDescription
             }
         }
-    }
-
-    @ViewBuilder private var chatToolbarContent: some View {
-ToolbarItem(placement: .navigationBarTrailing) {
-                HStack(spacing: 12) {
-                    Menu {
-                        Button {
-                            forkFrom(nil)
-                        } label: {
-                            Label("Fork at latest message", systemImage: "arrow.branch")
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                    }
-                    focusModeButton
-                    if viewModel.isStreaming {
-                        Button {
-                            Task { await viewModel.abort() }
-                        } label: {
-                            Image(systemName: "stop.circle")
-                                .foregroundColor(.red)
-                        }
-                    } else {
-                        statusDot
-                    }
-                }
-            }
-    }
-
-    /// pi-style focus mode cycle button (thinking -> no-thinking -> full).
-    private var focusModeButton: some View {
-        Button {
-            withAnimation {
-                let next: String
-                if displayModeRaw == DisplayMode.thinking.rawValue {
-                    next = DisplayMode.noThinking.rawValue
-                } else if displayModeRaw == DisplayMode.noThinking.rawValue {
-                    next = DisplayMode.full.rawValue
-                } else {
-                    next = DisplayMode.thinking.rawValue
-                }
-                displayModeRaw = next
-            }
-        } label: {
-            Image(systemName: focusIcon)
-                .foregroundColor(focusColor)
-        }
-    }
-
-    private var focusIcon: String {
-        if displayMode == .full { return "hammer.fill" }
-        return "hammer"
-    }
-
-    private var focusColor: Color {
-        if displayMode == .full { return .green }
-        if displayMode == .noThinking { return .orange }
-        return .secondary
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
