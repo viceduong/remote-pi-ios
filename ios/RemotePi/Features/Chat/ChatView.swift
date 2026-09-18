@@ -67,7 +67,21 @@ struct ChatView: View {
     @Environment(\.presentationMode) private var presentationMode
     @Environment(\.scenePhase) private var scenePhase
     /// Focus mode (default ON): hides tool output, calls, notes AND thinking.
-    @AppStorage("hideToolsEnabled") private var hideTools = true
+    /// pi-style display modes, cycled with the toolbar hammer button:
+    /// - thinking (default): tool output collapsed to headers, thinking visible
+    /// - no-thinking: tool output collapsed, thinking hidden
+    /// - full: full tool output + thinking
+    enum DisplayMode: String {
+        case thinking, noThinking = "no-thinking", full
+    }
+    @AppStorage("displayMode") private var displayModeRaw: String = DisplayMode.thinking.rawValue
+    var displayMode: DisplayMode {
+        get { DisplayMode(rawValue: displayModeRaw) ?? .thinking }
+        set { displayModeRaw = newValue.rawValue }
+    }
+    /// Legacy flag kept for the existing rendering paths: true when tools are
+    /// collapsed (thinking + no-thinking modes).
+    var hideTools: Bool { displayMode != .full }
 
     /// Cached visible list — recomputed only when messages or focus mode
     /// change. `visibleMessages` used to be a computed property doing full
@@ -81,21 +95,22 @@ struct ChatView: View {
         // Blank guard: when the tail is one huge tool loop, focus mode would
         // render nothing — fall back to showing tool rows.
         let focus = hideTools && !viewModel.focusModeFallback
-        let sig = "\(msgs.count)|\(msgs.last?.id ?? "")|\(focus)|\(viewModel.focusModeFallback)"
+        let hideThinking = displayMode == .noThinking
+        let sig = "\(msgs.count)|\(msgs.last?.id ?? "")|\(focus)|\(hideThinking)|\(viewModel.focusModeFallback)"
         if sig != cachedSignature {
             cachedSignature = sig
-            cachedVisible = Self.computeVisible(msgs, hideTools: focus)
+            cachedVisible = Self.computeVisible(msgs, hideTools: focus, hideThinking: hideThinking)
         }
         return cachedVisible
     }
 
-    private static func computeVisible(_ messages: [ChatMessage], hideTools: Bool) -> [ChatMessage] {
+    private static func computeVisible(_ messages: [ChatMessage], hideTools: Bool, hideThinking: Bool) -> [ChatMessage] {
         let base: [ChatMessage]
         if hideTools {
             base = messages
                 .filter { $0.role != .tool && !$0.isSystemNote }
                 .map { msg in
-                    guard msg.thinking != nil else { return msg }
+                    guard msg.thinking != nil, hideThinking else { return msg }
                     var m = msg
                     m.thinking = nil
                     return m
@@ -157,7 +172,7 @@ struct ChatView: View {
                         }
                         if hideTools && !viewModel.messages.isEmpty && viewModel.messages.contains(where: { $0.role == .tool || $0.isSystemNote }) {
                             Button {
-                                withAnimation { hideTools = false }
+                                withAnimation { displayMode = .full }
                             } label: {
                                 Label("Tool output, thinking & notes hidden — tap to show", systemImage: "hammer")
                                     .font(.caption)
@@ -417,10 +432,16 @@ struct ChatView: View {
                         Image(systemName: "ellipsis.circle")
                     }
                     Button {
-                        withAnimation { hideTools.toggle() }
+                        withAnimation {
+                            displayMode = switch displayMode {
+                            case .thinking: .noThinking
+                            case .noThinking: .full
+                            case .full: .thinking
+                            }
+                        }
                     } label: {
-                        Image(systemName: hideTools ? "hammer" : "hammer.circle")
-                            .foregroundColor(hideTools ? .orange : .secondary)
+                        Image(systemName: displayMode == .full ? "hammer.fill" : "hammer")
+                            .foregroundColor(displayMode == .full ? .green : (displayMode == .noThinking ? .orange : .secondary))
                     }
                     if viewModel.isStreaming {
                         Button {
