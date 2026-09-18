@@ -420,53 +420,8 @@ struct ChatView: View {
         .navigationTitle(session.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
-                HStack(spacing: 12) {
-                    Menu {
-                        Button {
-                            forkFrom(nil)
-                        } label: {
-                            Label("Fork at latest message", systemImage: "arrow.branch")
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                    }
-                    focusModeButton
-                    if viewModel.isStreaming {
-                        Button {
-                            Task { await viewModel.abort() }
-                        } label: {
-                            Image(systemName: "stop.circle")
-                                .foregroundColor(.red)
-                        }
-                    } else {
-                        statusDot
-                    }
-                }
-            }
-        }
-        .task { await viewModel.start() }
-        .task {
-            // Keep the host-ownership banner current.
-            while !Task.isCancelled {
-                if let summary = try? await client.fetchSession(session.id) {
-                    liveNow = summary.live == true
-                    livePid = summary.livePid
-                }
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
-            composerFocused = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
-            composerFocused = false
-        }
-        .onChange(of: scenePhase) { phase in
-            switch phase {
-            case .active:
-                viewModel.resumeNetwork()
-            case .inactive, .background:
+            ToolbarItem(placement: .navigationBarTrailing) { chatToolbarContent }
+        ive, .background:
                 viewModel.suspendNetwork()
             @unknown default:
                 break
@@ -528,17 +483,46 @@ struct ChatView: View {
         }
     }
 
+    @ViewBuilder private var chatToolbarContent: some View {
+ToolbarItem(placement: .navigationBarTrailing) {
+                HStack(spacing: 12) {
+                    Menu {
+                        Button {
+                            forkFrom(nil)
+                        } label: {
+                            Label("Fork at latest message", systemImage: "arrow.branch")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    focusModeButton
+                    if viewModel.isStreaming {
+                        Button {
+                            Task { await viewModel.abort() }
+                        } label: {
+                            Image(systemName: "stop.circle")
+                                .foregroundColor(.red)
+                        }
+                    } else {
+                        statusDot
+                    }
+                }
+            }
+    }
+
     /// pi-style focus mode cycle button (thinking -> no-thinking -> full).
     private var focusModeButton: some View {
         Button {
             withAnimation {
-                if displayMode == .thinking {
-                    displayMode = .noThinking
-                } else if displayMode == .noThinking {
-                    displayMode = .full
+                let next: String
+                if displayModeRaw == DisplayMode.thinking.rawValue {
+                    next = DisplayMode.noThinking.rawValue
+                } else if displayModeRaw == DisplayMode.noThinking.rawValue {
+                    next = DisplayMode.full.rawValue
                 } else {
-                    displayMode = .thinking
+                    next = DisplayMode.thinking.rawValue
                 }
+                displayModeRaw = next
             }
         } label: {
             Image(systemName: focusIcon)
