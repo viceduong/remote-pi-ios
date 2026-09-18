@@ -67,7 +67,8 @@ struct ChatView: View {
     @Environment(\.presentationMode) private var presentationMode
     @Environment(\.scenePhase) private var scenePhase
     /// Focus mode (default ON): hides tool output, calls, notes AND thinking.
-    @AppStorage("hideToolsEnabled") private var hideTools = true
+    /// Focus mode fixed at hidden (tools collapsed) — no toggle by design.
+    private var hideTools: Bool { true }
 
     /// Cached visible list — recomputed only when messages or focus mode
     /// change. `visibleMessages` used to be a computed property doing full
