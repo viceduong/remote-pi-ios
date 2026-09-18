@@ -106,7 +106,7 @@ struct ChatView: View {
             base = messages
         }
         return base.filter { msg in
-            if msg.role == .tool { return true } // tool header still useful even if text collapsed
+            if msg.role == .tool { return false } // pinned hidden: tools never render
             // Focus mode hides tool-call chips, so an assistant message whose
             // only content is tool calls (or nothing at all) renders as an
             // empty gap. Drop it — its tool output bubble still shows.
