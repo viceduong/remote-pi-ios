@@ -433,10 +433,12 @@ struct ChatView: View {
                     }
                     Button {
                         withAnimation {
-                            displayMode = switch displayMode {
-                            case .thinking: .noThinking
-                            case .noThinking: .full
-                            case .full: .thinking
+                            if displayMode == .thinking {
+                                displayMode = .noThinking
+                            } else if displayMode == .noThinking {
+                                displayMode = .full
+                            } else {
+                                displayMode = .thinking
                             }
                         }
                     } label: {
