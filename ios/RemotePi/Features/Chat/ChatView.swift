@@ -151,55 +151,7 @@ struct ChatView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 12) {
-                        if viewModel.messages.isEmpty && viewModel.isLoadingHistory {
-                            HStack {
-                                ProgressView()
-                                Text("Loading messages…")
-                                    .font(.caption)
-                                    .foregroundColor(theme.secondaryText)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, 40)
-                        }
-                        if hideTools && !viewModel.messages.isEmpty && viewModel.messages.contains(where: { $0.role == .tool || $0.isSystemNote }) {
-                            Button {
-                                withAnimation { displayModeRaw = "thinking" }
-                            } label: {
-                                Label("Tool output, thinking & notes hidden — tap to show", systemImage: "hammer")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            .padding(.vertical, 4)
-                        }
-                        ForEach(Array(visibleMessages.enumerated()), id: \.element.id) { index, message in
-                            MessageBubble(message: message, isStreaming: isStreaming(message),
-                                          hideToolCalls: hideTools && !viewModel.focusModeFallback,
-                                          toolCollapsed: hideTools && !viewModel.focusModeFallback,
-                                          onFocus: { item in focusItem = item },
-                                          onDiagnose: { diagnose($0) },
-                                          onFork: { forkFrom($0) })
-                            .id(message.id)
-                            .onAppear {
-                                // Prefetch the previous page before the user
-                                // reaches the very top (smooth pagination).
-                                if index < 8 {
-                                    Task { await viewModel.loadMore() }
-                                }
-                            }
-                        }
-                        // Queued + offline bubbles render AFTER messages —
-                        // they are the newest pending content and belong at
-                        // the bottom (above the composer), not the top.
-                        ForEach(viewModel.queuedItems) { item in
-                            QueuedBubble(item: item) {
-                                Task { await viewModel.cancelQueued(item.id) }
-                            }
-                        }
-                        ForEach(viewModel.offlinePending) { item in
-                            OfflineBubble(text: item.text) {
-                                withAnimation { viewModel.discardOffline(item.id) }
-                            }
-                        }
+                        chatRows
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 12)
@@ -525,6 +477,59 @@ struct ChatView: View {
                 viewModel.errorMessage = error.localizedDescription
             }
         }
+    }
+
+    /// Extracted LazyVStack children (body type-check complexity).
+    @ViewBuilder private var chatRows: some View {
+                            if viewModel.messages.isEmpty && viewModel.isLoadingHistory {
+                                HStack {
+                                    ProgressView()
+                                    Text("Loading messages…")
+                                        .font(.caption)
+                                        .foregroundColor(theme.secondaryText)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 40)
+                            }
+                            if hideTools && !viewModel.messages.isEmpty && viewModel.messages.contains(where: { $0.role == .tool || $0.isSystemNote }) {
+                                Button {
+                                    withAnimation { displayModeRaw = "thinking" }
+                                } label: {
+                                    Label("Tool output, thinking & notes hidden — tap to show", systemImage: "hammer")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                .padding(.vertical, 4)
+                            }
+                            ForEach(Array(visibleMessages.enumerated()), id: \.element.id) { index, message in
+                                MessageBubble(message: message, isStreaming: isStreaming(message),
+                                              hideToolCalls: hideTools && !viewModel.focusModeFallback,
+                                              toolCollapsed: hideTools && !viewModel.focusModeFallback,
+                                              onFocus: { item in focusItem = item },
+                                              onDiagnose: { diagnose($0) },
+                                              onFork: { forkFrom($0) })
+                                .id(message.id)
+                                .onAppear {
+                                    // Prefetch the previous page before the user
+                                    // reaches the very top (smooth pagination).
+                                    if index < 8 {
+                                        Task { await viewModel.loadMore() }
+                                    }
+                                }
+                            }
+                            // Queued + offline bubbles render AFTER messages —
+                            // they are the newest pending content and belong at
+                            // the bottom (above the composer), not the top.
+                            ForEach(viewModel.queuedItems) { item in
+                                QueuedBubble(item: item) {
+                                    Task { await viewModel.cancelQueued(item.id) }
+                                }
+                            }
+                            ForEach(viewModel.offlinePending) { item in
+                                OfflineBubble(text: item.text) {
+                                    withAnimation { viewModel.discardOffline(item.id) }
+                                }
+                            }
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
