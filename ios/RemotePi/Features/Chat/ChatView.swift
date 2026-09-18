@@ -431,20 +431,7 @@ struct ChatView: View {
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
-                    Button {
-                        withAnimation {
-                            if displayMode == .thinking {
-                                displayMode = .noThinking
-                            } else if displayMode == .noThinking {
-                                displayMode = .full
-                            } else {
-                                displayMode = .thinking
-                            }
-                        }
-                    } label: {
-                        Image(systemName: displayMode == .full ? "hammer.fill" : "hammer")
-                            .foregroundColor(displayMode == .full ? .green : (displayMode == .noThinking ? .orange : .secondary))
-                    }
+                    focusModeButton
                     if viewModel.isStreaming {
                         Button {
                             Task { await viewModel.abort() }
@@ -539,6 +526,35 @@ struct ChatView: View {
                 viewModel.errorMessage = error.localizedDescription
             }
         }
+    }
+
+    /// pi-style focus mode cycle button (thinking -> no-thinking -> full).
+    private var focusModeButton: some View {
+        Button {
+            withAnimation {
+                if displayMode == .thinking {
+                    displayMode = .noThinking
+                } else if displayMode == .noThinking {
+                    displayMode = .full
+                } else {
+                    displayMode = .thinking
+                }
+            }
+        } label: {
+            Image(systemName: focusIcon)
+                .foregroundColor(focusColor)
+        }
+    }
+
+    private var focusIcon: String {
+        if displayMode == .full { return "hammer.fill" }
+        return "hammer"
+    }
+
+    private var focusColor: Color {
+        if displayMode == .full { return .green }
+        if displayMode == .noThinking { return .orange }
+        return .secondary
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
