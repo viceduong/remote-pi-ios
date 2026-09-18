@@ -416,12 +416,6 @@ struct ChatView: View {
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
-                    Button {
-                        withAnimation { hideTools.toggle() }
-                    } label: {
-                        Image(systemName: hideTools ? "hammer" : "hammer.circle")
-                            .foregroundColor(hideTools ? .orange : .secondary)
-                    }
                     if viewModel.isStreaming {
                         Button {
                             Task { await viewModel.abort() }
