@@ -578,13 +578,14 @@ struct MessageBubble: View {
 
     private func scaled(_ base: CGFloat) -> CGFloat { base * CGFloat(textScale) }
 
-    init(message: ChatMessage, isStreaming: Bool, hideToolCalls: Bool = false,
+    init(message: ChatMessage, isStreaming: Bool, hideToolCalls: Bool = false, toolCollapsed: Bool = false,
          onFocus: @escaping (ToolFocusItem) -> Void = { _ in },
          onDiagnose: @escaping (ChatMessage) -> Void = { _ in },
          onFork: @escaping (ChatMessage) -> Void = { _ in }) {
         self.message = message
         self.isStreaming = isStreaming
         self.hideToolCalls = hideToolCalls
+        self.toolCollapsed = toolCollapsed
         self.onFocus = onFocus
         self.onDiagnose = onDiagnose
         self.onFork = onFork
