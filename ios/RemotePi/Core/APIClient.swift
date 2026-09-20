@@ -214,6 +214,14 @@ struct APIClient {
         try await delete("/api/sessions/\(id)/queue/\(itemId)")
     }
 
+    /// Full tool output for a toolCallId (skeleton mode fetch-on-expand).
+    func fetchToolResult(_ id: String, toolCallId: String) async throws -> String {
+        struct Wrapper: Decodable { let text: String }
+        let path = "/api/sessions/\(id)/toolresult/\(toolCallId)"
+        let wrapper: Wrapper = try await get(path)
+        return wrapper.text
+    }
+
     /// pi 0.85 get_session_stats via the bridge.
     func fetchStats(_ id: String) async throws -> SessionStats {
         struct Wrapper: Decodable { let stats: StatsJSON }

@@ -107,6 +107,8 @@ struct WireMessage: Decodable {
     let id: String?
     let role: String
     let text: String
+    /// Skeleton mode: any output block was truncated server-side.
+    let truncated: Bool?
     let thinking: String?
     let toolCalls: [WireToolCall]
     let toolName: String?
@@ -126,6 +128,7 @@ struct WireMessage: Decodable {
             entryId: id,
             role: .tool,
             text: text,
+            outputTruncated: truncated ?? false,
             thinking: nil,
             toolCalls: [],
             toolActivity: nil,
@@ -210,6 +213,9 @@ enum MessageRole: String, Codable {
 }
 
 struct ChatMessage: Identifiable, Equatable {
+    /// Skeleton mode: tool output was truncated server-side; full text is
+    /// fetchable via /toolresult/:toolCallId.
+    var outputTruncated = false
     /// Stable identity for SwiftUI. Server entries use pi IDs; optimistic
     /// messages use a client-generated ID and are replaced in-place on echo.
     var id: String
@@ -234,7 +240,7 @@ struct ChatMessage: Identifiable, Equatable {
     init(id: String? = nil, entryId: String? = nil, clientMessageId: String? = nil,
          role: MessageRole, text: String, thinking: String?, toolCalls: [ToolCall],
          toolActivity: ToolActivity?, isError: Bool, toolName: String?,
-         isSystemNote: Bool, model: String?, errorMessage: String?, timestamp: Int?) {
+         isSystemNote: Bool, model: String?, errorMessage: String?, timestamp: Int?, outputTruncated: Bool = false) {
         self.id = id ?? entryId.map { "entry:\($0)" } ?? "local:\(UUID().uuidString)"
         self.entryId = entryId
         self.clientMessageId = clientMessageId
@@ -249,6 +255,7 @@ struct ChatMessage: Identifiable, Equatable {
         self.model = model
         self.errorMessage = errorMessage
         self.timestamp = timestamp
+        self.outputTruncated = outputTruncated
     }
 
     /// Retain at most one consecutive blank line, trim leading/trailing

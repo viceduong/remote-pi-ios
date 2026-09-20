@@ -463,7 +463,7 @@ final class ChatViewModel: ObservableObject {
 
     private func openStream() {
         eventSource?.stop()
-        let base = client.baseURL.appendingPathComponent("api/sessions/\(sessionId)/events")
+        let base = client.baseURL.appendingPathComponent("api/sessions/\(sessionId)/events?skeleton=1")
         let source = EventSource(url: base, token: client.token)
         source.onStateChange = { [weak self] state in
             Task { @MainActor in
