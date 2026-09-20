@@ -129,7 +129,7 @@ struct WireMessage: Decodable {
             entryId: id,
             role: .tool,
             text: text,
-            outputTruncated: (truncated ?? false) || (outputTruncated ?? false),
+            outputTruncated: truncated ?? false,
             thinking: nil,
             toolCalls: [],
             toolActivity: nil,
