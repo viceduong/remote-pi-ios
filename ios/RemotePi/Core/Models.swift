@@ -109,6 +109,7 @@ struct WireMessage: Decodable {
     let text: String
     /// Skeleton mode: any output block was truncated server-side.
     let truncated: Bool?
+    let outputTruncated: Bool?
     let thinking: String?
     let toolCalls: [WireToolCall]
     let toolName: String?
@@ -128,7 +129,7 @@ struct WireMessage: Decodable {
             entryId: id,
             role: .tool,
             text: text,
-            outputTruncated: truncated ?? false,
+            outputTruncated: (truncated ?? false) || (outputTruncated ?? false),
             thinking: nil,
             toolCalls: [],
             toolActivity: nil,
