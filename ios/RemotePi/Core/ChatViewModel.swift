@@ -357,10 +357,18 @@ final class ChatViewModel: ObservableObject {
             if Self.hasVisibleContent(messages) == false, hasMore,
                let visible = try? await client.fetchMessages(sessionId, limit: 100, visibleOnly: true),
                !visible.messages.isEmpty {
-                messages = visible.messages
-                historyEpoch += 1
+                // MERGE, don't replace: the visible page spans a much wider
+                // time range than the raw 100-row page. Replacing dropped
+                // rows the prefetch had already loaded (missing-messages bug).
+                let known = Set(messages.compactMap { $0.entryId })
+                let fresh = visible.messages.filter { $0.entryId == nil || !known.contains($0.entryId!) }
+                if !fresh.isEmpty {
+                    messages.insert(contentsOf: fresh, at: 0)
+                    historyEpoch += 1
+                }
                 hasMore = visible.hasMore
-                lowestFetchedTs = visible.messages.compactMap { $0.timestamp }.min()
+                lowestFetchedTs = min(lowestFetchedTs ?? Int.max,
+                                      visible.messages.compactMap { $0.timestamp }.min() ?? Int.max)
                 if let last = visible.messages.last(where: { $0.entryId != nil })?.entryId {
                     lastSeenEntryId = last
                 }
