@@ -626,6 +626,24 @@ final class ChatViewModel: ObservableObject {
                 queuedItems = parsed.filter { $0.status != "done" && $0.status != "failed" }
                 if queuedItems.isEmpty { queuedNote = nil }
             }
+        case "agent_status":
+            // Server-derived authoritative status (skeleton clients don't see
+            // tool events, so this is the accurate running/waiting signal).
+            let working = (obj["working"] as? Bool) ?? false
+            let error = obj["error"] as? String
+            self.working = working
+            if working {
+                isStreaming = true
+                workingText = "Working…"
+                fileActivityAt = Date()
+            } else {
+                isStreaming = false
+                workingText = nil
+                fileActivityAt = nil
+            }
+            if let error, !error.isEmpty {
+                errorMessage = "Agent error: \(error)"
+            }
         case "agent_crashed":
             // Server auto-respawns; surface it instead of a silent stop.
             isStreaming = false
