@@ -126,10 +126,10 @@ struct WireMessage: Decodable {
         if role == .assistant && toolName != nil { role = .tool }
         if role == .tool {
         return ChatMessage(
+            id: nil,
             entryId: id,
             role: .tool,
             text: text,
-            outputTruncated: truncated ?? false,
             thinking: nil,
             toolCalls: [],
             toolActivity: nil,
@@ -137,8 +137,9 @@ struct WireMessage: Decodable {
             toolName: toolName,
             isSystemNote: false,
             model: nil,
-            errorMessage: errorMessage,
-            timestamp: timestamp
+            errorMessage: nil,
+            timestamp: timestamp,
+            outputTruncated: truncated ?? false,
         )
     }
     return ChatMessage(
