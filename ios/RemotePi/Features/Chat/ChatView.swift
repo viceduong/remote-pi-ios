@@ -173,6 +173,7 @@ struct ChatView: View {
                                           onFocus: { item in focusItem = item },
                                           onDiagnose: { diagnose($0) },
                                           onFork: { forkFrom($0) })
+                            .equatable()
                             .id(message.id)
                             .onAppear {
                                 // Prefetch the previous page before the user
@@ -538,7 +539,12 @@ struct ChatView: View {
 }
 
 /// One message bubble: user right, assistant/tool left, markdown rendering.
-struct MessageBubble: View {
+struct MessageBubble: View, Equatable {
+    static func == (lhs: MessageBubble, rhs: MessageBubble) -> Bool {
+        lhs.message == rhs.message
+            && lhs.isStreaming == rhs.isStreaming
+            && lhs.hideToolCalls == rhs.hideToolCalls
+    }
     let message: ChatMessage
     let isStreaming: Bool
     var hideToolCalls = false

@@ -487,8 +487,12 @@ final class ChatViewModel: ObservableObject {
             }
         }
         source.onFrame = { [weak self] frame in
+            // Parse off-main: JSON decoding of per-token deltas was hopping to
+            // the main actor ~100x/sec during streaming.
+            let obj = frame.data.data(using: .utf8)
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
             Task { @MainActor in
-                self?.handle(frame: frame)
+                self?.handleParsed(frame: frame, obj: obj)
             }
         }
         source.onError = { [weak self] message in
@@ -501,12 +505,9 @@ final class ChatViewModel: ObservableObject {
         source.start()
     }
 
-    private func handle(frame: SSEFrame) {
+    private func handleParsed(frame: SSEFrame, obj: [String: Any]?) {
         lastFrameTime = Date()
-        guard let data = frame.data.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return
-        }
+        guard let obj else { return }
         defer { evictLiveTailIfNeeded() }
         switch frame.event {
         case "agent_start", "turn_start":
@@ -785,6 +786,13 @@ final class ChatViewModel: ObservableObject {
         }
         await saveOfflineQueue()
         if offlinePending.isEmpty { queuedNote = nil }
+    }
+
+    /// Fetch full tool output for a truncated (skeleton) tool message and
+    /// replace its text in place.
+    func expandToolOutput(toolCallId: String?) async -> String? {
+        guard let tid = toolCallId, !tid.isEmpty else { return nil }
+        return try? await client.fetchToolResult(sessionId, toolCallId: tid)
     }
 
     func discardOffline(_ id: UUID) {

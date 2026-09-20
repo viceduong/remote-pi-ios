@@ -27,17 +27,19 @@ enum ChatMerger {
     ///    longer text starting with the partial) -> replace.
     /// 3. Otherwise dedupe by entry id / text-head + timestamp window.
     static func append(_ existing: inout [ChatMessage], _ tail: [ChatMessage]) {
+        // O(1) lookup indexes — firstIndex scans made bursts O(n^2) on
+        // large histories.
+        var byEntry = Dictionary(uniqueKeysWithValues: existing.enumerated().compactMap { (i, m) in m.entryId.map { ($0, i) } })
+        var byClient = Dictionary(uniqueKeysWithValues: existing.enumerated().compactMap { (i, m) in m.clientMessageId.map { ($0, i) } })
         var toAdd: [ChatMessage] = []
         for m in tail {
-            if let eid = m.entryId,
-               let existingIdx = existing.firstIndex(where: { $0.entryId == eid }) {
+            if let eid = m.entryId, let existingIdx = byEntry[eid] {
                 var replacement = m
                 replacement.id = existing[existingIdx].id
                 existing[existingIdx] = replacement
                 continue
             }
-            if let clientId = m.clientMessageId,
-               let existingIdx = existing.firstIndex(where: { $0.clientMessageId == clientId }) {
+            if let clientId = m.clientMessageId, let existingIdx = byClient[clientId] {
                 var replacement = m
                 replacement.id = existing[existingIdx].id
                 existing[existingIdx] = replacement
@@ -63,6 +65,8 @@ enum ChatMerger {
                 }
             }
             if isDuplicate(m, in: existing) || isDuplicate(m, in: toAdd) { continue }
+            if let eid = m.entryId { byEntry[eid] = existing.count }
+            if let cid = m.clientMessageId { byClient[cid] = existing.count }
             toAdd.append(m)
         }
         if !toAdd.isEmpty { existing.append(contentsOf: toAdd) }
