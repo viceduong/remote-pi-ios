@@ -113,12 +113,7 @@ struct ChatView: View {
             if hideTools && msg.role == .assistant {
                 let textEmpty = msg.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 let thinkEmpty = msg.thinking?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
-                if textEmpty && thinkEmpty {
-                    // Tool-call-only turn: render a one-line summary instead of
-                    // an invisible gap (looks like a missing response).
-                    if !msg.toolCalls.isEmpty { return true }
-                    return false
-                }
+                if textEmpty && thinkEmpty { return false }
             }
             return !msg.isBlankForDisplay
         }
@@ -762,19 +757,6 @@ struct MessageBubble: View, Equatable {
         VStack(alignment: .leading, spacing: 6) {
             if let thinking = message.thinking, !thinking.isEmpty {
                 ThinkingView(text: thinking)
-            }
-            if message.text.isEmpty && !message.toolCalls.isEmpty && hideToolCalls {
-                HStack(spacing: 6) {
-                    Image(systemName: "hammer.fill")
-                        .font(.caption2)
-                    Text("Ran \(message.toolCalls.count) tool\(message.toolCalls.count == 1 ? "" : "s")")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(theme.secondaryBackground.opacity(0.6))
-                .clipShape(Capsule())
             }
             if !message.text.isEmpty {
                 if isStreaming {
