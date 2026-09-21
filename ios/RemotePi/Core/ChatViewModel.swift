@@ -140,14 +140,14 @@ final class ChatViewModel: ObservableObject {
     private func startPolling() {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
                 guard !Task.isCancelled else { break }
                 guard let self, self.lifecycleActive else { return }
-                // Skip the poll while SSE is alive (it just delivered a frame):
-                // the poll is only a safety net for missed file events.
-                if Date().timeIntervalSince(self.lastFrameTime) > 30 {
-                    await self.refreshFromServer()
-                }
+                // Since-cursor refresh is cheap (only new rows). Run it on
+                // EVERY poll tick: SSE can silently drop frames, and the old
+                // "only if silent 30s" gate let intermittent misses persist
+                // until manual reload.
+                await self.refreshFromServer()
                 // pi 0.85 stats: refresh context/cost periodically.
                 if let stats = try? await self.client.fetchStats(self.sessionId) {
                     self.stats = stats
@@ -201,6 +201,10 @@ final class ChatViewModel: ObservableObject {
         let knownIds = Set(messages.compactMap { $0.entryId })
         let fresh = page.messages.filter { message in
             if let id = message.entryId, knownIds.contains(id) { return true }
+            // nil-timestamp rows would be dropped by the >= newestLocal check
+            // (0 >= newest is false) — treat them as fresh and let the merger
+            // dedupe them.
+            guard message.timestamp != nil else { return !isDuplicate(message) }
             return (message.timestamp ?? 0) >= newestLocal && !isDuplicate(message)
         }
         if !fresh.isEmpty { appendTail(fresh) }
