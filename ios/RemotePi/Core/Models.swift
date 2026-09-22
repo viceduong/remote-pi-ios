@@ -218,9 +218,6 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     /// Skeleton mode: tool output was truncated server-side; full text is
     /// fetchable via /toolresult/:toolCallId.
     var outputTruncated = false
-    /// Skeleton mode: tool output was truncated server-side; full text is
-    /// fetchable via /toolresult/:toolCallId.
-    var outputTruncated = false
     /// Stable identity for SwiftUI. Server entries use pi IDs; optimistic
     /// messages use a client-generated ID and are replaced in-place on echo.
     var id: String
