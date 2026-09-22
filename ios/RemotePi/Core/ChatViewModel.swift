@@ -112,7 +112,7 @@ final class ChatViewModel: ObservableObject {
                 applyWorkingIndicator()
                 // Snapshot is on screen — lift the cover instantly; the
                 // network refresh merges any delta below.
-                cacheLoaded = true
+
             }
         }
         await loadHistory()

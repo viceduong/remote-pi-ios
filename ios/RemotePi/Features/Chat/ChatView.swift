@@ -281,12 +281,6 @@ struct ChatView: View {
                         scrollToBottom(proxy, animated: false)
                     }
                 }
-                .onChange(of: viewModel.cacheLoaded) { loaded in
-                    // Cached snapshot rendered — lift the cover instantly.
-                    if loaded && !sessionReady {
-                        withAnimation(.easeIn(duration: 0.15)) { sessionReady = true }
-                    }
-                }
                 .onChange(of: viewModel.historyEpoch) { _ in
                     // History was replaced wholesale (initial load or the
                     // visible-filter refetch). Re-arm the bottom clamp so the
