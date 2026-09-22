@@ -29,6 +29,9 @@ final class ChatViewModel: ObservableObject {
     /// the initial bottom clamp on change so a replaced message array always
     /// lands at absolute bottom.
     @Published private(set) var historyEpoch = 0
+    /// True when a cached snapshot was rendered at open — ChatView lifts the
+    /// dim cover immediately when this fires.
+    @Published private(set) var cacheLoaded = false
     private var viewModelLoadedFromCache = false
     /// Live "what the assistant is doing" label (Working/Thinking/Running tool…).
     @Published private(set) var workingText: String?
@@ -109,7 +112,7 @@ final class ChatViewModel: ObservableObject {
                 applyWorkingIndicator()
                 // Snapshot is on screen — lift the cover instantly; the
                 // network refresh merges any delta below.
-                sessionReady = true
+                cacheLoaded = true
             }
         }
         await loadHistory()
