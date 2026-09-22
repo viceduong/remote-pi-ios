@@ -269,8 +269,10 @@ struct ChatMessage: Identifiable, Equatable, Codable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decodeIfPresent(String.self, forKey: .id)
-        entryId = try c.decodeIfPresent(String.self, forKey: .entryId)
+        let decodedId = try c.decodeIfPresent(String.self, forKey: .id)
+        let decodedEntry = try c.decodeIfPresent(String.self, forKey: .entryId)
+        id = decodedId ?? decodedEntry.map { "entry:\($0)" } ?? "local:\(UUID().uuidString)"
+        entryId = decodedEntry
         clientMessageId = try c.decodeIfPresent(String.self, forKey: .clientMessageId)
         role = try c.decode(MessageRole.self, forKey: .role)
         text = try c.decode(String.self, forKey: .text)
