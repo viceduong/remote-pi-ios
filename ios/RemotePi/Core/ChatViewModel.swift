@@ -29,6 +29,7 @@ final class ChatViewModel: ObservableObject {
     /// the initial bottom clamp on change so a replaced message array always
     /// lands at absolute bottom.
     @Published private(set) var historyEpoch = 0
+    private var viewModelLoadedFromCache = false
     /// Live "what the assistant is doing" label (Working/Thinking/Running tool…).
     @Published private(set) var workingText: String?
     @Published var errorMessage: String?
@@ -95,6 +96,22 @@ final class ChatViewModel: ObservableObject {
 
     func start() async {
         lifecycleActive = true
+        // Instant open: render the on-disk snapshot, then reconcile over the
+        // network. The dim cover lifts on the snapshot so the session appears
+        // fully loaded immediately.
+        if messages.isEmpty, !viewModelLoadedFromCache {
+            if let snap = await SessionHistoryCache.shared.load(sessionId: sessionId) {
+                messages = snap.messages
+                hasMore = snap.hasMore
+                lastSeenEntryId = snap.cursor
+                historyEpoch += 1
+                viewModelLoadedFromCache = true
+                applyWorkingIndicator()
+                // Snapshot is on screen — lift the cover instantly; the
+                // network refresh merges any delta below.
+                sessionReady = true
+            }
+        }
         await loadHistory()
         guard lifecycleActive else { return }
         await loadQueue()
@@ -212,6 +229,10 @@ final class ChatViewModel: ObservableObject {
         if let last = page.messages.last(where: { $0.entryId != nil })?.entryId {
             lastSeenEntryId = last
         }
+        // Keep the instant-open cache warm.
+        await SessionHistoryCache.shared.save(
+            sessionId: sessionId, messages: messages, hasMore: hasMore,
+            cursor: lastSeenEntryId)
     }
 
     func setViewportNearBottom(_ value: Bool) {
@@ -383,6 +404,10 @@ final class ChatViewModel: ObservableObject {
             if Self.hasVisibleContent(messages) == false {
                 focusModeFallback = true
             }
+            // Persist for instant-open next time.
+            await SessionHistoryCache.shared.save(
+                sessionId: sessionId, messages: messages, hasMore: hasMore,
+                cursor: lastSeenEntryId)
         } catch {
             if isCancellation(error) { return }
             errorMessage = error.localizedDescription

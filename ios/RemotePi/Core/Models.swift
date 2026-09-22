@@ -214,7 +214,10 @@ enum MessageRole: String, Codable {
     case user, assistant, tool
 }
 
-struct ChatMessage: Identifiable, Equatable {
+struct ChatMessage: Identifiable, Equatable, Codable {
+    /// Skeleton mode: tool output was truncated server-side; full text is
+    /// fetchable via /toolresult/:toolCallId.
+    var outputTruncated = false
     /// Skeleton mode: tool output was truncated server-side; full text is
     /// fetchable via /toolresult/:toolCallId.
     var outputTruncated = false

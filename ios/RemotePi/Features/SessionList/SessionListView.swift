@@ -316,6 +316,7 @@ struct SessionListView: View {
         Task {
             do {
                 try await client.deleteSession(session.id, purge: true, force: force)
+                await SessionHistoryCache.shared.purge(sessionId: session.id)
                 withAnimation {
                     sessions.removeAll { $0.id == session.id }
                 }
