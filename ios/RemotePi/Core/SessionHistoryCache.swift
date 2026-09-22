@@ -17,7 +17,7 @@ actor SessionHistoryCache {
     private let root: URL
 
     private init() {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userMask)[0]
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         root = base.appendingPathComponent("RemotePi", isDirectory: true)
             .appendingPathComponent("HistoryCache", isDirectory: true)
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

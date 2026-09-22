@@ -263,6 +263,49 @@ struct ChatMessage: Identifiable, Equatable, Codable {
         self.outputTruncated = outputTruncated
     }
 
+    enum CodingKeys: String, CodingKey {
+        case id, entryId, clientMessageId, role, text, thinking, toolCalls
+        case isError, toolName, isSystemNote, model
+        case errorMessage, timestamp
+        // outputTruncated intentionally excluded: runtime-only flag, defaults false
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id)
+        entryId = try c.decodeIfPresent(String.self, forKey: .entryId)
+        clientMessageId = try c.decodeIfPresent(String.self, forKey: .clientMessageId)
+        role = try c.decode(MessageRole.self, forKey: .role)
+        text = try c.decode(String.self, forKey: .text)
+        thinking = try c.decodeIfPresent(String.self, forKey: .thinking).map { Self.collapseBlankLines($0) }
+        toolCalls = try c.decode([ToolCall].self, forKey: .toolCalls)
+        isError = try c.decodeIfPresent(Bool.self, forKey: .isError) ?? false
+        toolName = try c.decodeIfPresent(String.self, forKey: .toolName)
+        isSystemNote = try c.decodeIfPresent(Bool.self, forKey: .isSystemNote) ?? false
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+        errorMessage = try c.decodeIfPresent(String.self, forKey: .errorMessage)
+        timestamp = try c.decodeIfPresent(Int.self, forKey: .timestamp)
+        outputTruncated = false
+        toolActivity = nil
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(id, forKey: .id)
+        try c.encodeIfPresent(entryId, forKey: .entryId)
+        try c.encodeIfPresent(clientMessageId, forKey: .clientMessageId)
+        try c.encode(role, forKey: .role)
+        try c.encode(text, forKey: .text)
+        try c.encodeIfPresent(thinking, forKey: .thinking)
+        try c.encode(toolCalls, forKey: .toolCalls)
+        try c.encode(isError, forKey: .isError)
+        try c.encodeIfPresent(toolName, forKey: .toolName)
+        try c.encode(isSystemNote, forKey: .isSystemNote)
+        try c.encodeIfPresent(model, forKey: .model)
+        try c.encodeIfPresent(errorMessage, forKey: .errorMessage)
+        try c.encodeIfPresent(timestamp, forKey: .timestamp)
+    }
+
     /// Retain at most one consecutive blank line, trim leading/trailing
     /// blank lines and trailing whitespace. Handles whitespace-only lines
     /// (" \\n \\n") as blank so duplicate blanks collapse.
@@ -446,7 +489,7 @@ struct OfflineMessage: Identifiable, Codable, Equatable {
     }
 }
 
-struct ToolCall: Equatable {
+struct ToolCall: Equatable, Codable {
     var id: String?
     var name: String
     var argumentsText: String
