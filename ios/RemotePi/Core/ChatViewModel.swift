@@ -115,13 +115,16 @@ final class ChatViewModel: ObservableObject {
 
             }
         }
-        if viewModelLoadedFromCache {
+        if viewModelLoadedFromCache, Self.hasVisibleContent(messages) {
             // Warm open: the snapshot is already rendered and the cursor is
             // seeded. A delta-only refresh is all that's needed — the full
             // loadHistory (100-row fetch + visible refetch + cache re-save)
             // re-churned layout for seconds after the cover lifted.
             await refreshFromServer()
         } else {
+            // Cold open, or the cached snapshot has no renderable content
+            // (forked/compacted session whose file changed) — full load with
+            // the visible-filter blank guard.
             await loadHistory()
         }
         guard lifecycleActive else { return }
