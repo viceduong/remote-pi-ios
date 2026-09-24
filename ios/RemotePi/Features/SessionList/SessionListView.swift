@@ -282,14 +282,33 @@ struct SessionListView: View {
             let page = try await client.listSessions(limit: 50)
             guard generation == loadGeneration else { return }
             serverInfo = info
-            var merged = sessions
-            var byId = Dictionary(uniqueKeysWithValues: merged.map { ($0.id, $0) })
-            for s in page.sessions {
-                byId[s.id] = s
+            let refreshStartedAt = Date()
+            if !page.hasMore {
+                // Complete list — the server is authoritative. REPLACE so
+                // sessions the server no longer knows about (re-keyed to a
+                // canonical id, deleted elsewhere) disappear instead of
+                // lingering as ghost duplicates. Locally inserted rows newer
+                // than this refresh are preserved against the race where the
+                // server page was built just before they landed.
+                var merged = page.sessions
+                let serverIds = Set(merged.map(\.id))
+                for local in sessions where !serverIds.contains(local.id) {
+                    let created = Date(timeIntervalSince1970: TimeInterval(local.createdAt) / 1000)
+                    if created > refreshStartedAt { merged.append(local) }
+                }
+                sessions = merged.sorted { ($0.lastMessageAt ?? $0.lastActivityAt) > ($1.lastMessageAt ?? $1.lastActivityAt) }
+                hasMore = false
+            } else {
+                var merged = sessions
+                var byId = Dictionary(uniqueKeysWithValues: merged.map { ($0.id, $0) })
+                for s in page.sessions {
+                    byId[s.id] = s
+                }
+                let result = byId.values.sorted { ($0.lastMessageAt ?? $0.lastActivityAt) > ($1.lastMessageAt ?? $1.lastActivityAt) }
+                // never shrink loaded pages
+                sessions = result.count < sessions.count ? sessions : result
+                hasMore = true
             }
-            merged = byId.values.sorted { ($0.lastMessageAt ?? $0.lastActivityAt) > ($1.lastMessageAt ?? $1.lastActivityAt) }
-            if merged.count < sessions.count { merged = sessions } // never shrink loaded pages
-            sessions = merged
         } catch {
             // keep showing the last good list, but clear stale connectivity.
             if generation == loadGeneration { serverInfo = nil }
