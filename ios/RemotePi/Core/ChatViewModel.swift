@@ -645,7 +645,15 @@ final class ChatViewModel: ObservableObject {
             }
         case "agent_exited":
             isStreaming = false
-            connectionState = .disconnected
+            // The AGENT exited — not the SSE transport (EventSource owns
+            // that state). Flipping connectionState here turned the status
+            // dot orange and disabled the send button for every other
+            // open session; the next send auto-respawns the agent anyway.
+            // Keep a pending-crash banner; otherwise drop stale status.
+            if workingText != "Agent crashed — restarting…" {
+                working = false
+                workingText = nil
+            }
         case "queue_update":
             // pi 0.85 native shape: { steering: [text], followUp: [text] }.
             // Bridge legacy shape: { items: [QueueItem] }.
