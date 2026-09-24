@@ -228,13 +228,20 @@ struct APIClient {
         struct StatsJSON: Decodable {
             let tokens: [String: Int]
             let cost: Double?
-            let contextUsage: [String: Double]?
+            // Values can be null in the wire shape (seeded sidecars, models
+            // without a known context window) — strict [String: Double]?
+            // throws on null values and killed the whole decode.
+            let contextUsage: [String: Double?]?
         }
         let wrapper: Wrapper = try await get("/api/sessions/\(id)/stats")
         var json: [String: Any] = [:]
         json["tokens"] = wrapper.stats.tokens
         json["cost"] = wrapper.stats.cost as Any?
-        json["contextUsage"] = wrapper.stats.contextUsage as Any?
+        if let cu = wrapper.stats.contextUsage {
+            var cleaned: [String: Any] = [:]
+            for (key, value) in cu { if let value { cleaned[key] = value } }
+            if !cleaned.isEmpty { json["contextUsage"] = cleaned }
+        }
         if let stats = SessionStats(json: json) { return stats }
         throw APIError.decoding("malformed session stats")
     }
