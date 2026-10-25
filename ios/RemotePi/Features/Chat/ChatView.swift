@@ -342,6 +342,9 @@ struct ChatView: View {
         // fixed-height reservation above the input stops viewport jumps.
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
+                if let question = viewModel.pendingQuestion {
+                    QuestionCardView(viewModel: viewModel, question: question)
+                }
                 if let work = viewModel.workingText {
                     HStack(spacing: 8) {
                         ProgressView()
@@ -1033,6 +1036,112 @@ struct StreamingDots: View {
         }
         .onAppear { on = true }
         .padding(.vertical, 6)
+    }
+}
+
+/// Ask-user-question card: renders the pending questionnaire above the
+/// composer (single/multi select, option descriptions, optional typed answer).
+struct QuestionCardView: View {
+    @ObservedObject var viewModel: ChatViewModel
+    let question: AgentQuestion
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "questionmark.bubble")
+                Text("Agent question")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Button {
+                    Task { await viewModel.cancelQuestion() }
+                } label: {
+                    Text("Cancel").font(.caption)
+                }
+            }
+            .foregroundColor(theme.accent)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(question.items) { item in
+                        VStack(alignment: .leading, spacing: 6) {
+                            if !item.header.isEmpty {
+                                Text(item.header.uppercased())
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundColor(theme.accent)
+                            }
+                            Text(item.question)
+                                .font(.subheadline)
+                                .foregroundColor(theme.terminalText)
+                            ForEach(item.options) { option in
+                                optionRow(item: item, option: option)
+                            }
+                            TextField(item.multiSelect ? "Add a note (optional)…" : "Type something…",
+                                      text: Binding(
+                                        get: { viewModel.questionText[item.index] ?? "" },
+                                        set: { viewModel.questionText[item.index] = $0 }))
+                                .font(.caption)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(theme.secondaryBackground)
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 260)
+
+            Button {
+                Task { await viewModel.submitQuestion() }
+            } label: {
+                Text("Submit")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(theme.accent.opacity(0.18))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+        }
+        .padding(12)
+        .background(theme.secondaryBackground.opacity(0.6))
+        .overlay(Rectangle().frame(height: 1).foregroundColor(theme.accent.opacity(0.25)),
+                 alignment: .top)
+    }
+
+    private func optionRow(item: AgentQuestion.Item, option: AgentQuestion.Option) -> some View {
+        let isSelected = (viewModel.questionSelections[item.index] ?? []).contains(option.label)
+        return Button {
+            var current = viewModel.questionSelections[item.index] ?? []
+            if item.multiSelect {
+                if current.contains(option.label) { current.remove(option.label) }
+                else { current.insert(option.label) }
+            } else {
+                current = [option.label]
+                viewModel.questionText[item.index] = ""
+            }
+            viewModel.questionSelections[item.index] = current
+        } label: {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: isSelected
+                      ? (item.multiSelect ? "checkmark.square.fill" : "largecircle.fill.circle")
+                      : (item.multiSelect ? "square" : "circle"))
+                    .foregroundColor(isSelected ? theme.accent : theme.secondaryText)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(option.label)
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(theme.terminalText)
+                    if !option.description.isEmpty {
+                        Text(option.description)
+                            .font(.caption2)
+                            .foregroundColor(theme.secondaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 

@@ -61,6 +61,61 @@ struct QueueItem: Decodable, Identifiable, Equatable {
     let error: String?
 }
 
+/// A structured question the agent is waiting on (`ask_user_question`).
+/// Transport: the extension embeds the questionnaire in a select() title over
+/// RPC; the server turns it into an `agent_question` SSE frame.
+struct AgentQuestion: Equatable, Identifiable {
+    struct Option: Equatable, Identifiable {
+        let label: String
+        let description: String
+        let preview: String?
+        var id: String { label }
+    }
+
+    struct Item: Equatable, Identifiable {
+        let index: Int
+        let header: String
+        let question: String
+        let multiSelect: Bool
+        let options: [Option]
+        var id: Int { index }
+
+        /// Per-question selection state (labels for multi, single label for
+        /// single-select, plus optional typed text).
+        init?(json: [String: Any]) {
+            guard let question = json["question"] as? String else { return nil }
+            self.index = (json["index"] as? NSNumber)?.intValue ?? 0
+            self.header = json["header"] as? String ?? ""
+            self.question = question
+            self.multiSelect = json["multiSelect"] as? Bool ?? false
+            self.options = (json["options"] as? [[String: Any]] ?? []).compactMap { o in
+                guard let label = o["label"] as? String else { return nil }
+                return Option(label: label,
+                              description: o["description"] as? String ?? "",
+                              preview: (o["preview"] as? String).flatMap { $0.isEmpty ? nil : $0 })
+            }
+        }
+    }
+
+    let requestId: String
+    let items: [Item]
+
+    init?(json: [String: Any]) {
+        guard let requestId = json["requestId"] as? String,
+              let raw = json["questions"] as? [[String: Any]] else { return nil }
+        let items = raw.enumerated().compactMap { offset, element -> Item? in
+            var copy = element
+            if copy["index"] == nil { copy["index"] = offset }
+            return Item(json: copy)
+        }
+        guard !items.isEmpty else { return nil }
+        self.requestId = requestId
+        self.items = items.sorted { $0.index < $1.index }
+    }
+
+    var id: String { requestId }
+}
+
 /// Cumulative provider usage from pi 0.85 `message_update.usage`.
 struct SessionUsage: Equatable {
     let input: Int

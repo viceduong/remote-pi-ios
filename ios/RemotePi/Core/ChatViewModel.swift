@@ -23,6 +23,12 @@ final class ChatViewModel: ObservableObject {
     /// Server-owned queued prompts (durable outbox — rendered as pending
     /// bubbles with cancel; never vanish, survive navigation/restart).
     @Published private(set) var queuedItems: [QueueItem] = []
+    /// Unanswered `ask_user_question` questionnaire (card above the composer).
+    @Published private(set) var pendingQuestion: AgentQuestion?
+    /// Selections per question index (labels for multi-select, single label
+    /// otherwise) + optional typed text, reset whenever a new question lands.
+    @Published var questionSelections: [Int: Set<String>] = [:]
+    @Published var questionText: [Int: String] = [:]
     /// Server-owned queued prompts (rendered as pending bubbles — never vanish).
     @Published private(set) var isLoadingHistory = true
     /// Bumped every time history is (re)loaded wholesale — ChatView re-arms
@@ -643,6 +649,19 @@ final class ChatViewModel: ObservableObject {
                 if Self.isToolMessage(msg) { upsertTool(from: msg, finalize: true) }
                 else { upsertAssistant(from: msg, finalize: true) }
             }
+        case "agent_question":
+            if let question = AgentQuestion(json: obj) {
+                pendingQuestion = question
+                questionSelections = [:]
+                questionText = [:]
+            }
+        case "agent_question_resolved":
+            let resolvedId = obj["requestId"] as? String
+            if resolvedId == nil || resolvedId == pendingQuestion?.requestId {
+                pendingQuestion = nil
+                questionSelections = [:]
+                questionText = [:]
+            }
         case "agent_exited":
             isStreaming = false
             // The AGENT exited — not the SSE transport (EventSource owns
@@ -813,6 +832,59 @@ final class ChatViewModel: ObservableObject {
         // pi 0.85 stats: tokens/cost/context (best-effort, mirror sessions skip).
         if let stats = try? await client.fetchStats(sessionId) {
             self.stats = stats
+        }
+    }
+
+    /// Build and POST the questionnaire answers. Single-select questions take
+    /// one label (or typed text), multi-select take the selected set.
+    func submitQuestion() async {
+        guard let question = pendingQuestion else { return }
+        var answers: [APIClient.QuestionAnswerPayload] = []
+        for item in question.items {
+            let typed = questionText[item.index]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let selected = questionSelections[item.index] ?? []
+            if item.multiSelect {
+                let labels = item.options.map(\.label).filter { selected.contains($0) }
+                if !labels.isEmpty || !typed.isEmpty {
+                    answers.append(.init(questionIndex: item.index, question: item.question,
+                                         kind: "multi", answer: labels.joined(separator: ", "),
+                                         selected: labels, notes: typed.isEmpty ? nil : typed,
+                                         preview: nil))
+                }
+            } else if let label = item.options.map(\.label).first(where: { selected.contains($0) }) {
+                let preview = item.options.first { $0.label == label }?.preview
+                answers.append(.init(questionIndex: item.index, question: item.question,
+                                     kind: "option", answer: label, selected: nil,
+                                     notes: typed.isEmpty ? nil : typed, preview: preview))
+            } else if !typed.isEmpty {
+                answers.append(.init(questionIndex: item.index, question: item.question,
+                                     kind: "custom", answer: typed, selected: nil,
+                                     notes: nil, preview: nil))
+            }
+        }
+        guard !answers.isEmpty else { return }
+        await sendQuestionAnswers(question.requestId, answers: answers, cancelled: false)
+    }
+
+    func cancelQuestion() async {
+        guard let question = pendingQuestion else { return }
+        await sendQuestionAnswers(question.requestId, answers: [], cancelled: true)
+    }
+
+    private func sendQuestionAnswers(_ requestId: String,
+                                     answers: [APIClient.QuestionAnswerPayload],
+                                     cancelled: Bool) async {
+        let answered = pendingQuestion
+        pendingQuestion = nil
+        questionSelections = [:]
+        questionText = [:]
+        do {
+            try await client.answerQuestion(sessionId, requestId: requestId,
+                                            answers: answers, cancelled: cancelled)
+        } catch {
+            // Keep the card if the answer didn't reach the server.
+            if let answered = answered { pendingQuestion = answered }
+            errorMessage = error.localizedDescription
         }
     }
 

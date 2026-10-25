@@ -173,6 +173,27 @@ struct APIClient {
                 wrapper.total ?? 0, wrapper.pending?.map(\.text) ?? [], wrapper.working ?? false)
     }
 
+    /// One answer inside a questionnaire response (mirrors pi's QuestionAnswer).
+    struct QuestionAnswerPayload: Encodable {
+        let questionIndex: Int
+        let question: String
+        let kind: String          // "option" | "custom" | "chat" | "multi"
+        let answer: String?
+        let selected: [String]?
+        let notes: String?
+        let preview: String?
+    }
+
+    /// POST /api/sessions/:id/question/:requestId — answer an
+    /// ask_user_question questionnaire (or cancel it).
+    func answerQuestion(_ id: String, requestId: String,
+                        answers: [QuestionAnswerPayload], cancelled: Bool) async throws {
+        struct Ok: Decodable { let ok: Bool }
+        struct Body: Encodable { let answers: [QuestionAnswerPayload]; let cancelled: Bool }
+        let _: Ok = try await post("/api/sessions/\(id)/question/\(requestId)",
+                                   body: Body(answers: answers, cancelled: cancelled))
+    }
+
     func sendTurn(_ id: String, message: String, force: Bool = false,
                   clientMessageId: String? = nil) async throws -> TurnResponse {
         let suffix = force ? "?force=1" : ""
