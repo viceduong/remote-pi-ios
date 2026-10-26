@@ -335,7 +335,7 @@ final class ChatViewModel: ObservableObject {
         case .user:
             return TranscriptItem(id: m.id, kind: .user, text: m.text, entryId: m.entryId)
         case .assistant, .tool:
-            if m.isError {
+            if m.isErrorRow {
                 var text = m.text
                 if !text.hasVisibleCharacters {
                     text = (m.errorMessage?.hasVisibleCharacters == true) ? m.errorMessage! : "Error"

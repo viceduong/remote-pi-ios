@@ -22,8 +22,15 @@ extension ChatMessage {
         case .user:
             return !m.isSystemNote && m.text.hasVisibleCharacters
         case .assistant:
-            return m.text.hasVisibleCharacters || m.isError
+            return m.text.hasVisibleCharacters || m.isErrorRow
         }
+    }
+
+    /// Error row: explicit `isError`, or an assistant turn that failed with a
+    /// provider `errorMessage` and produced no text (pi never sets `isError`
+    /// on assistant errors — matches the server's visibility rule).
+    var isErrorRow: Bool {
+        isError || (!text.hasVisibleCharacters && (errorMessage?.hasVisibleCharacters ?? false))
     }
 
     static func hasVisibleContent(_ messages: [ChatMessage]) -> Bool {
