@@ -470,7 +470,7 @@ struct QuestionCardView: View {
             }
             Text(item.question)
                 .font(.subheadline)
-                .foregroundColor(theme.terminalText)
+                .foregroundColor(theme.text)
                 .fixedSize(horizontal: false, vertical: true)
             ForEach(item.options) { option in
                 optionRow(item: item, option: option)
@@ -560,7 +560,7 @@ struct QuestionCardView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(option.label)
                             .font(.caption.weight(.semibold))
-                            .foregroundColor(theme.terminalText)
+                            .foregroundColor(theme.text)
                         if !option.description.isEmpty {
                             Text(option.description)
                                 .font(.caption2)
@@ -601,13 +601,33 @@ struct QuestionPreviewBlock: View {
         return CGFloat(lines) * lineHeight + 16
     }
 
+    /// Previews are markdown; a block that is one fenced code block shows
+    /// just its code (no ``` fence lines).
+    static func displayText(_ raw: String) -> String {
+        var lines = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: "
+")
+        guard lines.count >= 2,
+              lines.first?.trimmingCharacters(in: .whitespaces).hasPrefix("```") == true,
+              lines.last?.trimmingCharacters(in: .whitespaces) == "```" else { return raw }
+        lines.removeFirst()
+        lines.removeLast()
+        return lines.joined(separator: "
+")
+    }
+
     var body: some View {
-        ScrollView([.horizontal, .vertical], showsIndicators: true) {
-            Text(text)
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundColor(theme.text)
-                .fixedSize(horizontal: true, vertical: true)
-                .padding(8)
+        // A two-axis ScrollView centres content smaller than itself; pin it
+        // to the top-leading corner via a min-size frame.
+        GeometryReader { geo in
+            ScrollView([.horizontal, .vertical], showsIndicators: true) {
+                Text(Self.displayText(text))
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundColor(theme.text)
+                    .fixedSize(horizontal: true, vertical: true)
+                    .padding(8)
+                    .frame(minWidth: geo.size.width, minHeight: geo.size.height, alignment: .topLeading)
+            }
         }
         .frame(height: min(Self.maxHeight, naturalHeight))
         .frame(maxWidth: .infinity, alignment: .leading)
