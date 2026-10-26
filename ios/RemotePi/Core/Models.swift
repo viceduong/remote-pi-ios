@@ -50,6 +50,10 @@ struct SessionSummary: Codable, Identifiable, Hashable {
 }
 
 /// Server-owned prompt queue item (durable outbox).
+///
+/// Contract v2: the server only returns `queued` / `running` items and each
+/// carries its `clientMessageId`. Decoding is tolerant so the v1 server (and
+/// any future additive change) never breaks the whole queue payload.
 struct QueueItem: Decodable, Identifiable, Equatable {
     let id: String
     let clientMessageId: String?
@@ -59,6 +63,60 @@ struct QueueItem: Decodable, Identifiable, Equatable {
     let startedAt: Int?
     let completedAt: Int?
     let error: String?
+
+    init(id: String, clientMessageId: String?, message: String, status: String,
+         queuedAt: Int?, startedAt: Int? = nil, completedAt: Int? = nil, error: String? = nil) {
+        self.id = id
+        self.clientMessageId = clientMessageId
+        self.message = message
+        self.status = status
+        self.queuedAt = queuedAt
+        self.startedAt = startedAt
+        self.completedAt = completedAt
+        self.error = error
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, clientMessageId, message, text, status, queuedAt, startedAt, completedAt, error
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        clientMessageId = try? c.decodeIfPresent(String.self, forKey: .clientMessageId)
+        message = (try? c.decodeIfPresent(String.self, forKey: .message))
+            ?? (try? c.decodeIfPresent(String.self, forKey: .text))
+            ?? ""
+        status = (try? c.decodeIfPresent(String.self, forKey: .status)) ?? "queued"
+        queuedAt = Self.flexibleInt(c, .queuedAt)
+        startedAt = Self.flexibleInt(c, .startedAt)
+        completedAt = Self.flexibleInt(c, .completedAt)
+        error = try? c.decodeIfPresent(String.self, forKey: .error)
+    }
+
+    private static func flexibleInt(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) -> Int? {
+        if let v = try? c.decodeIfPresent(Int.self, forKey: key) { return v }
+        if let d = try? c.decodeIfPresent(Double.self, forKey: key) { return Int(d) }
+        return nil
+    }
+
+    /// Item still pending delivery (v1 servers also return done/failed rows).
+    var isActive: Bool { status != "done" && status != "failed" && status != "cancelled" }
+
+    /// Build from an untyped SSE `queue_update.items[]` element.
+    init?(json d: [String: Any]) {
+        guard let id = d["id"] as? String else { return nil }
+        let message = (d["message"] as? String) ?? (d["text"] as? String)
+        guard let message else { return nil }
+        self.init(id: id,
+                  clientMessageId: d["clientMessageId"] as? String,
+                  message: message,
+                  status: d["status"] as? String ?? "queued",
+                  queuedAt: (d["queuedAt"] as? NSNumber)?.intValue,
+                  startedAt: (d["startedAt"] as? NSNumber)?.intValue,
+                  completedAt: (d["completedAt"] as? NSNumber)?.intValue,
+                  error: d["error"] as? String)
+    }
 }
 
 /// A structured question the agent is waiting on (`ask_user_question`).
@@ -124,12 +182,12 @@ struct SessionUsage: Equatable {
     let cost: Double?
 
     init?(json: [String: Any]) {
-        guard let input = json["input"] as? Int,
-              let output = json["output"] as? Int else { return nil }
+        guard let input = (json["input"] as? NSNumber)?.intValue,
+              let output = (json["output"] as? NSNumber)?.intValue else { return nil }
         self.input = input
         self.output = output
-        self.totalTokens = (json["totalTokens"] as? Int) ?? input + output
-        if let cost = json["cost"] as? [String: Any], let total = cost["total"] as? Double {
+        self.totalTokens = (json["totalTokens"] as? NSNumber)?.intValue ?? input + output
+        if let cost = json["cost"] as? [String: Any], let total = (cost["total"] as? NSNumber)?.doubleValue {
             self.cost = total
         } else {
             self.cost = nil
@@ -158,15 +216,14 @@ struct SessionStats: Equatable {
 }
 
 /// GET /api/sessions/:id/messages — wire format (server/src/history.ts shape).
+/// Every field except `role` decodes leniently so one odd row can never fail
+/// the whole page.
 struct WireMessage: Decodable {
     let id: String?
     let role: String
-    let text: String
-    /// Skeleton mode: any output block was truncated server-side.
-    let truncated: Bool?
-    let outputTruncated: Bool?
+    let text: String?
     let thinking: String?
-    let toolCalls: [WireToolCall]
+    let toolCalls: [WireToolCall]?
     let toolName: String?
     let isError: Bool?
     /// Server marks prune summaries (served as role "user") as system notes.
@@ -174,49 +231,50 @@ struct WireMessage: Decodable {
     let model: String?
     let timestamp: Int?
     let errorMessage: String?
+    /// Contract v2 §3: echo of the client idempotency key on user rows.
+    let clientMessageId: String?
 
     func toChatMessage() -> ChatMessage {
-        var role = MessageRole(rawValue: self.role) ?? .assistant
-        // pi sends tool results with role "toolResult" (+ toolName) — normalize.
-        if role == .assistant && toolName != nil { role = .tool }
+        let rawRole = self.role
+        var role: MessageRole
+        var isError = self.isError ?? false
+        switch rawRole {
+        case "user": role = .user
+        case "assistant": role = .assistant
+        case "tool", "toolResult": role = .tool
+        case "error":
+            // Contract v2 §4: role "error" rows are visible error rows.
+            role = .assistant
+            isError = true
+        default: role = .assistant
+        }
+        if let toolName, !toolName.isEmpty { role = .tool }
+        let body = text ?? ""
         if role == .tool {
+            return ChatMessage(entryId: id, role: .tool, text: body, thinking: nil, toolCalls: [],
+                               isError: isError, toolName: toolName, isSystemNote: false,
+                               model: nil, errorMessage: nil, timestamp: timestamp)
+        }
         return ChatMessage(
-            id: nil,
             entryId: id,
-            role: .tool,
-            text: text,
-            thinking: nil,
-            toolCalls: [],
-            toolActivity: nil,
-            isError: isError ?? false,
+            clientMessageId: role == .user ? clientMessageId : nil,
+            role: role,
+            text: body,
+            thinking: thinking,
+            toolCalls: (toolCalls ?? []).map { ToolCall(id: $0.id, name: $0.name ?? "tool", argumentsText: $0.argumentsText) },
+            isError: isError,
             toolName: toolName,
-            isSystemNote: false,
-            model: nil,
-            errorMessage: nil,
-            timestamp: timestamp,
-            outputTruncated: truncated ?? false,
+            isSystemNote: role == .user && (system == true || ChatMessage.isBgNotification(body)),
+            model: model,
+            errorMessage: errorMessage,
+            timestamp: timestamp
         )
     }
-    return ChatMessage(
-        entryId: id,
-        role: role,
-        text: text,
-        thinking: thinking,
-        toolCalls: toolCalls.map { ToolCall(id: $0.id, name: $0.name, argumentsText: $0.argumentsText) },
-        toolActivity: nil,
-        isError: isError ?? false,
-        toolName: toolName,
-        isSystemNote: role == .user && (system == true || ChatMessage.isBgNotification(text)),
-        model: model,
-        errorMessage: errorMessage,
-        timestamp: timestamp
-    )
-}
 }
 
 struct WireToolCall: Decodable {
     let id: String?
-    let name: String
+    let name: String?
     let arguments: AnyJSON?
 
     var argumentsText: String {
@@ -258,8 +316,7 @@ struct TurnResponse: Decodable {
     let queueItemId: String?
     /// Server queue depth at accept time (backpressure signal).
     let queueDepth: Int?
-    /// True when the prompt went to the agent immediately (idle session) —
-    /// no queued chip should be rendered (it duplicated the blue bubble).
+    /// True when the prompt went to the agent immediately (idle session).
     let dispatched: Bool?
 }
 
@@ -270,25 +327,23 @@ enum MessageRole: String, Codable {
 }
 
 struct ChatMessage: Identifiable, Equatable, Codable {
-    /// Skeleton mode: tool output was truncated server-side; full text is
-    /// fetchable via /toolresult/:toolCallId.
-    var outputTruncated = false
-    /// Stable identity for SwiftUI. Server entries use pi IDs; optimistic
-    /// messages use a client-generated ID and are replaced in-place on echo.
+    /// Stable row identity for the transcript. Assigned once when the row is
+    /// first created (optimistic / streaming / server) and preserved through
+    /// every later merge — only `entryId` gets attached when the canonical
+    /// copy arrives.
     var id: String
-    /// pi entry id ("m…") — enables forking from this message.
+    /// pi entry id — enables forking from this message.
     var entryId: String?
-    /// Client idempotency key for optimistic/offline sends.
+    /// Client idempotency key for optimistic/offline sends (contract v2 §3).
     var clientMessageId: String?
     var role: MessageRole
     var text: String
     var thinking: String?
     var toolCalls: [ToolCall]
-    var toolActivity: ToolActivity?
     var isError: Bool
     var toolName: String?
-    /// pi writes background-shell notifications as role "user" (model context) —
-    /// render them as system notes instead of user bubbles.
+    /// pi writes background-shell notifications / prune summaries as role
+    /// "user" — they are system notes, never user bubbles.
     var isSystemNote: Bool
     var model: String?
     var errorMessage: String?
@@ -296,8 +351,8 @@ struct ChatMessage: Identifiable, Equatable, Codable {
 
     init(id: String? = nil, entryId: String? = nil, clientMessageId: String? = nil,
          role: MessageRole, text: String, thinking: String?, toolCalls: [ToolCall],
-         toolActivity: ToolActivity?, isError: Bool, toolName: String?,
-         isSystemNote: Bool, model: String?, errorMessage: String?, timestamp: Int?, outputTruncated: Bool = false) {
+         isError: Bool, toolName: String?,
+         isSystemNote: Bool, model: String?, errorMessage: String?, timestamp: Int?) {
         self.id = id ?? entryId.map { "entry:\($0)" } ?? "local:\(UUID().uuidString)"
         self.entryId = entryId
         self.clientMessageId = clientMessageId
@@ -305,21 +360,18 @@ struct ChatMessage: Identifiable, Equatable, Codable {
         self.text = Self.collapseBlankLines(text)
         self.thinking = thinking.map { Self.collapseBlankLines($0) }
         self.toolCalls = toolCalls
-        self.toolActivity = toolActivity
         self.isError = isError
         self.toolName = toolName
         self.isSystemNote = isSystemNote
         self.model = model
         self.errorMessage = errorMessage
         self.timestamp = timestamp
-        self.outputTruncated = outputTruncated
     }
 
     enum CodingKeys: String, CodingKey {
         case id, entryId, clientMessageId, role, text, thinking, toolCalls
         case isError, toolName, isSystemNote, model
         case errorMessage, timestamp
-        // outputTruncated intentionally excluded: runtime-only flag, defaults false
     }
 
     init(from decoder: Decoder) throws {
@@ -331,21 +383,19 @@ struct ChatMessage: Identifiable, Equatable, Codable {
         clientMessageId = try c.decodeIfPresent(String.self, forKey: .clientMessageId)
         role = try c.decode(MessageRole.self, forKey: .role)
         text = try c.decode(String.self, forKey: .text)
-        thinking = try c.decodeIfPresent(String.self, forKey: .thinking).map { Self.collapseBlankLines($0) }
-        toolCalls = try c.decode([ToolCall].self, forKey: .toolCalls)
+        thinking = try c.decodeIfPresent(String.self, forKey: .thinking)
+        toolCalls = try c.decodeIfPresent([ToolCall].self, forKey: .toolCalls) ?? []
         isError = try c.decodeIfPresent(Bool.self, forKey: .isError) ?? false
         toolName = try c.decodeIfPresent(String.self, forKey: .toolName)
         isSystemNote = try c.decodeIfPresent(Bool.self, forKey: .isSystemNote) ?? false
         model = try c.decodeIfPresent(String.self, forKey: .model)
         errorMessage = try c.decodeIfPresent(String.self, forKey: .errorMessage)
         timestamp = try c.decodeIfPresent(Int.self, forKey: .timestamp)
-        outputTruncated = false
-        toolActivity = nil
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encodeIfPresent(id, forKey: .id)
+        try c.encode(id, forKey: .id)
         try c.encodeIfPresent(entryId, forKey: .entryId)
         try c.encodeIfPresent(clientMessageId, forKey: .clientMessageId)
         try c.encode(role, forKey: .role)
@@ -361,64 +411,60 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     }
 
     /// Retain at most one consecutive blank line, trim leading/trailing
-    /// blank lines and trailing whitespace. Handles whitespace-only lines
-    /// (" \\n \\n") as blank so duplicate blanks collapse.
+    /// blank lines and trailing spaces/tabs. Whitespace-only lines count as
+    /// blank. Single linear scan — no regex (this runs for every message).
     static func collapseBlankLines(_ s: String) -> String {
-        var t = s.replacingOccurrences(of: "\r\n", with: "\n")
-        t = t.replacingOccurrences(of: "\r", with: "\n")
-        // Split preserves empty entries so blank lines are visible
-        let rawLines = t.components(separatedBy: "\n")
-        var out: [String] = []
-        out.reserveCapacity(rawLines.count)
-        var consecutiveBlanks = 0
-        for line in rawLines {
-            // Trim trailing whitespace; leading stays for code blocks, but
-            // whitespace-only lines become ""
-            let trimmedTrail = line.replacingOccurrences(of: "[\\t ]+$", with: "", options: .regularExpression)
-            let isBlank = trimmedTrail.trimmingCharacters(in: .whitespaces).isEmpty
-            if isBlank {
-                consecutiveBlanks += 1
-                if consecutiveBlanks <= 1 { out.append("") }
-            } else {
-                consecutiveBlanks = 0
-                out.append(trimmedTrail)
+        guard !s.isEmpty else { return s }
+        var out = ""
+        out.reserveCapacity(s.utf8.count)
+        var wroteAny = false
+        var pendingBlank = false
+        // "\r\n" is a single Character in Swift.
+        let lines = s.split(omittingEmptySubsequences: false,
+                            whereSeparator: { $0 == "\n" || $0 == "\r\n" || $0 == "\r" })
+        for line in lines {
+            var end = line.endIndex
+            while end > line.startIndex {
+                let prev = line.index(before: end)
+                let ch = line[prev]
+                if ch == " " || ch == "\t" { end = prev } else { break }
             }
+            let trimmed = line[line.startIndex..<end]
+            let isBlank = trimmed.allSatisfy { $0.isWhitespace }
+            if isBlank {
+                if wroteAny { pendingBlank = true }
+                continue
+            }
+            if wroteAny { out += pendingBlank ? "\n\n" : "\n" }
+            out.append(contentsOf: trimmed)
+            wroteAny = true
+            pendingBlank = false
         }
-        while out.first == "" { out.removeFirst() }
-        while out.last == "" { out.removeLast() }
-        return out.joined(separator: "\n")
-    }
-
-    var isBlankForDisplay: Bool {
-        let textEmpty = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let thinkEmpty = thinking?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
-        // Assistant tool-call bubbles (text empty, only toolCalls) render as
-        // nothing visible in focus mode — they look like blank gaps. Hide
-        // them unless focus mode is off (chips are shown there).
-        let hasVisibleToolCalls = !toolCalls.isEmpty
-        return textEmpty && thinkEmpty && !hasVisibleToolCalls
-    }
-
-    static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
-        lhs.id == rhs.id && lhs.entryId == rhs.entryId && lhs.role == rhs.role
-            && lhs.text == rhs.text && lhs.thinking == rhs.thinking
+        return out
     }
 
     /// Build a display message from a pi AgentMessage JSON blob (same mapping
     /// the server applies for history; kept in sync with server/src/history.ts).
     static func fromAgentMessage(_ json: [String: Any]) -> ChatMessage {
+        let timestamp = (json["timestamp"] as? NSNumber)?.intValue
         // Server-mapped shape (history/file_update): flat text/toolCalls fields.
         if let text = json["text"] as? String {
             let rawRole = json["role"] as? String ?? "assistant"
-            let toolName = json["toolName"] as? String
-            let role: MessageRole = (rawRole == "tool" || rawRole == "toolResult" || toolName != nil)
-                ? .tool
-                : (MessageRole(rawValue: rawRole) ?? .assistant)
+            let toolName = (json["toolName"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            var isError = (json["isError"] as? Bool) ?? false
+            let role: MessageRole
+            if rawRole == "tool" || rawRole == "toolResult" || toolName != nil {
+                role = .tool
+            } else if rawRole == "error" {
+                role = .assistant
+                isError = true
+            } else {
+                role = MessageRole(rawValue: rawRole) ?? .assistant
+            }
             let wireCalls = (json["toolCalls"] as? [[String: Any]]) ?? []
             return ChatMessage(
-                id: (json["id"] as? String).map { "entry:\($0)" },
                 entryId: json["id"] as? String,
-                clientMessageId: json["clientMessageId"] as? String,
+                clientMessageId: role == .user ? json["clientMessageId"] as? String : nil,
                 role: role,
                 text: text,
                 thinking: json["thinking"] as? String,
@@ -426,13 +472,12 @@ struct ChatMessage: Identifiable, Equatable, Codable {
                     ToolCall(id: $0["id"] as? String, name: $0["name"] as? String ?? "tool",
                              argumentsText: prettyArguments($0["arguments"]))
                 },
-                toolActivity: nil,
-                isError: (json["isError"] as? Bool) ?? false,
+                isError: isError,
                 toolName: toolName,
                 isSystemNote: role == .user && ((json["system"] as? Bool) == true || isBgNotification(text)),
                 model: json["model"] as? String,
                 errorMessage: json["errorMessage"] as? String,
-                timestamp: json["timestamp"] as? Int
+                timestamp: timestamp
             )
         }
         var text = ""
@@ -463,25 +508,22 @@ struct ChatMessage: Identifiable, Equatable, Codable {
         }
 
         // Tool output: pi marks it with a toolName (roles: toolResult/assistant/user).
-        var toolName = json["toolName"] as? String
-        // Legacy: content made only of toolCall/toolResult blocks.
-        let toolOnlyContent: Bool = {
-            guard let blocks = json["content"] as? [[String: Any]], !blocks.isEmpty else { return false }
-            let toolTypes: Set<String> = ["toolCall", "toolResult", "image"]
-            return blocks.allSatisfy { toolTypes.contains($0["type"] as? String ?? "") }
-        }()
+        let toolName = (json["toolName"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         // pi serves extension custom messages (context-prune summaries) as
         // role "custom" with customType — system notes, never user bubbles.
         let rawRole = json["role"] as? String
         let isCustom = rawRole == "custom" || (json["customType"] as? String)?.isEmpty == false
         let hasToolResultBlock = (json["content"] as? [[String: Any]])?.contains { ($0["type"] as? String) == "toolResult" } == true
-        let isToolResult = toolName?.isEmpty == false || rawRole == "tool" || rawRole == "toolResult" || hasToolResultBlock
+        let isToolResult = toolName != nil || rawRole == "tool" || rawRole == "toolResult" || hasToolResultBlock
+        var isError = (json["isError"] as? Bool) ?? false
         let role: MessageRole
-        if isToolResult || rawRole == "tool" || rawRole == "toolResult" {
+        if isToolResult {
             role = .tool
         } else if isCustom {
-            toolName = nil
             role = .user
+        } else if rawRole == "error" {
+            role = .assistant
+            isError = true
         } else {
             role = MessageRole(rawValue: rawRole ?? "") ?? .assistant
         }
@@ -498,20 +540,18 @@ struct ChatMessage: Identifiable, Equatable, Codable {
         }
 
         return ChatMessage(
-            id: (json["id"] as? String).map { "entry:\($0)" },
             entryId: json["id"] as? String,
-            clientMessageId: json["clientMessageId"] as? String,
+            clientMessageId: role == .user ? json["clientMessageId"] as? String : nil,
             role: role,
             text: text,
             thinking: thinking,
             toolCalls: toolCalls,
-            toolActivity: nil,
-            isError: (json["isError"] as? Bool) ?? false,
-            toolName: json["toolName"] as? String,
+            isError: isError,
+            toolName: isCustom ? nil : toolName,
             isSystemNote: role == .user && (isCustom || (json["system"] as? Bool) == true || Self.isBgNotification(text)),
             model: model,
             errorMessage: json["errorMessage"] as? String,
-            timestamp: json["timestamp"] as? Int
+            timestamp: timestamp
         )
     }
 
@@ -524,6 +564,7 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     private static func prettyArguments(_ raw: Any?) -> String {
         guard let raw else { return "" }
         if let dict = raw as? [String: Any],
+           JSONSerialization.isValidJSONObject(dict),
            let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]),
            let str = String(data: data, encoding: .utf8) {
             return str
@@ -541,141 +582,13 @@ struct OfflineMessage: Identifiable, Codable, Equatable {
         self.id = id
         self.text = text
     }
+
+    /// The idempotency key this message is (re)sent with.
+    var clientMessageId: String { id.uuidString }
 }
 
 struct ToolCall: Equatable, Codable {
     var id: String?
     var name: String
     var argumentsText: String
-}
-
-enum ToolStatus: Equatable {
-    case running
-    case done(isError: Bool)
-}
-
-struct ToolActivity: Equatable {
-    var toolName: String
-    var argsSummary: String
-    var resultPreview: String?
-    var status: ToolStatus
-}
-
-// MARK: - Codable AgentMessage (pi RPC wire format)
-
-/// pi message content is either a plain string (user) or a block array (assistant).
-struct AgentMessage: Decodable {
-    let role: String
-    let content: MessageContent?
-    let timestamp: Int?
-    let model: String?
-    let provider: String?
-    let errorMessage: String?
-    let toolName: String?
-    let isError: Bool?
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        role = try c.decode(String.self, forKey: .role)
-        timestamp = try c.decodeIfPresent(Int.self, forKey: .timestamp)
-        model = try c.decodeIfPresent(String.self, forKey: .model)
-        provider = try c.decodeIfPresent(String.self, forKey: .provider)
-        errorMessage = try c.decodeIfPresent(String.self, forKey: .errorMessage)
-        toolName = try c.decodeIfPresent(String.self, forKey: .toolName)
-        isError = try c.decodeIfPresent(Bool.self, forKey: .isError)
-        if let str = try? c.decode(String.self, forKey: .content) {
-            content = .text(str)
-        } else if let blocks = try? c.decode([ContentBlock].self, forKey: .content) {
-            content = .blocks(blocks)
-        } else {
-            content = nil
-        }
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case role, content, timestamp, model, provider, errorMessage, toolName, isError
-    }
-}
-
-enum MessageContent {
-    case text(String)
-    case blocks([ContentBlock])
-}
-
-struct ContentBlock: Decodable {
-    let type: String
-    let text: String?
-    let thinking: String?
-    let id: String?
-    let name: String?
-    let arguments: JSONValue?
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        type = try c.decode(String.self, forKey: .type)
-        text = try c.decodeIfPresent(String.self, forKey: .text)
-        thinking = try c.decodeIfPresent(String.self, forKey: .thinking)
-        id = try c.decodeIfPresent(String.self, forKey: .id)
-        name = try c.decodeIfPresent(String.self, forKey: .name)
-        arguments = try c.decodeIfPresent(JSONValue.self, forKey: .arguments)
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case type, text, thinking, id, name, arguments
-    }
-}
-
-/// JSON blob that can hold arbitrary tool arguments.
-enum JSONValue: Decodable {
-    case object([String: JSONValue])
-    case array([JSONValue])
-    case string(String)
-    case number(Double)
-    case bool(Bool)
-    case null
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.singleValueContainer()
-        if c.decodeNil() { self = .null }
-        else if let b = try? c.decode(Bool.self) { self = .bool(b) }
-        else if let n = try? c.decode(Double.self) { self = .number(n) }
-        else if let s = try? c.decode(String.self) {
-            // Arguments sometimes arrive as a JSON string — unpack objects
-            // while preserving ordinary strings verbatim.
-            if let data = s.data(using: .utf8),
-               let obj = try? JSONSerialization.jsonObject(with: data) {
-                self = JSONValue.fromAny(obj)
-            } else {
-                self = .string(s)
-            }
-        } else if let dict = try? c.decode([String: JSONValue].self) {
-            self = .object(dict)
-        } else if let array = try? c.decode([JSONValue].self) {
-            self = .array(array)
-        } else {
-            throw DecodingError.dataCorruptedError(in: c, debugDescription: "Unsupported JSON value")
-        }
-    }
-
-    static func fromAny(_ value: Any) -> JSONValue {
-        if value is NSNull { return .null }
-        if let dict = value as? [String: Any] { return .object(dict.mapValues { fromAny($0) }) }
-        if let array = value as? [Any] { return .array(array.map { fromAny($0) }) }
-        if let str = value as? String { return .string(str) }
-        if let bool = value as? Bool { return .bool(bool) }
-        if let number = value as? NSNumber { return .number(number.doubleValue) }
-        return .string(String(describing: value))
-    }
-
-    /// Compact single-line summary used in tool chips.
-    var summary: String {
-        switch self {
-        case .string(let s): return s.count > 60 ? String(s.prefix(60)) + "…" : s
-        case .number(let n): return String(n)
-        case .bool(let b): return String(b)
-        case .null: return "null"
-        case .array(let values): return "[" + values.map(\.summary).joined(separator: ", ") + "]"
-        case .object(let dict): return dict.map { "\($0.key): \($0.value.summary)" }.joined(separator: ", ")
-        }
-    }
 }

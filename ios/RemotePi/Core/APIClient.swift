@@ -58,7 +58,7 @@ struct APIClient {
         do {
             (data, response) = try await Self.session.data(for: req)
         } catch {
-            if (error as NSError).code == NSURLErrorCancelled {
+            if APIClient.isCancellation(error) {
                 throw CancellationError()
             }
             throw APIError.offline
@@ -117,6 +117,15 @@ struct APIClient {
         _ = try await send(makeRequest(path, method: "DELETE"))
     }
 
+    /// True for any flavour of "the caller went away" — these must never be
+    /// surfaced to the user as errors.
+    static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+        let ns = error as NSError
+        return ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled
+    }
+
     // MARK: - Typed endpoints
 
     func fetchServerInfo() async throws -> ServerInfo {
@@ -154,23 +163,42 @@ struct APIClient {
         try await delete("/api/sessions/\(id)?\(qs)")
     }
 
-    /// GET /api/sessions/:id/messages — last N messages, paginated with `before`.
-    func fetchMessages(_ id: String, limit: Int = 100, before: Int? = nil, since: String? = nil, visibleOnly: Bool = false) async throws -> (messages: [ChatMessage], hasMore: Bool, total: Int, pending: [String], working: Bool) {
-        struct Pending: Decodable { let text: String }
+    /// One page of `GET /api/sessions/:id/messages`.
+    struct MessagePage {
+        let messages: [ChatMessage]
+        let hasMore: Bool
+        let total: Int
+        /// Server-derived working flag (v1 status hint; nil on `before` pages).
+        let working: Bool?
+        /// True when a `since` cursor was honoured (delta); false when the
+        /// server fell back to a full tail page (unknown cursor). nil = old
+        /// server that doesn't report it.
+        let cursorMode: Bool?
+    }
+
+    /// GET /api/sessions/:id/messages — last N messages, paginated with `before`,
+    /// or only the rows after an entry-id cursor with `since`.
+    func fetchMessages(_ id: String, limit: Int = 100, before: Int? = nil, since: String? = nil,
+                       visibleOnly: Bool = false) async throws -> MessagePage {
         struct Wrapper: Decodable {
             let messages: [WireMessage]
             let hasMore: Bool?
             let total: Int?
-            let pending: [Pending]?
             let working: Bool?
+            let cursorMode: Bool?
         }
         var query = "?limit=\(limit)"
         if let before { query += "&before=\(before)" }
-        if let since { query += "&since=\(since)" }
+        if let since, let encoded = since.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+            query += "&since=\(encoded)"
+        }
         if visibleOnly { query += "&visible=1" }
         let wrapper: Wrapper = try await get("/api/sessions/\(id)/messages\(query)")
-        return (wrapper.messages.map { $0.toChatMessage() }, wrapper.hasMore ?? false,
-                wrapper.total ?? 0, wrapper.pending?.map(\.text) ?? [], wrapper.working ?? false)
+        return MessagePage(messages: wrapper.messages.map { $0.toChatMessage() },
+                           hasMore: wrapper.hasMore ?? false,
+                           total: wrapper.total ?? 0,
+                           working: wrapper.working,
+                           cursorMode: wrapper.cursorMode)
     }
 
     /// One answer inside a questionnaire response (mirrors pi's QuestionAnswer).

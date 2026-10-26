@@ -1,6 +1,5 @@
 import Foundation
 import UIKit
-import SwiftUI
 
 /**
  * Minimal SOTA-grade ANSI/VT100 renderer for pi message text.
@@ -163,71 +162,5 @@ enum ANSIParser {
     private static func cube(_ v: Int) -> CGFloat {
         let vals: [CGFloat] = [0, 95, 135, 175, 215, 255]
         return vals[v] / 255
-    }
-}
-
-/// Renders ANSI-colored text with terminal styling (dark, monospace).
-/// Parsing happens off-main with an NSCache — opening a session with many
-/// tool blocks doesn't stutter the first frame.
-struct TerminalText: View {
-    let text: String
-    var color: Color = Color(hex: 0x8FE3A0)
-    var fontSize: CGFloat = 12
-    var maxLines: Int? = nil
-    @State private var parsed: NSAttributedString?
-
-    private static let cache = NSCache<NSString, NSAttributedString>()
-
-    var body: some View {
-        let base = parsed ?? NSAttributedString(
-            string: text,
-            attributes: [
-                .font: UIFont.monospacedSystemFont(ofSize: fontSize, weight: .regular),
-                .foregroundColor: UIColor(color),
-            ]
-        )
-        Text(AttributedString(base))
-            .ifLet(maxLines) { view, lines in view.lineLimit(lines) }
-            .onAppear { load() }
-            .onChange(of: text) { _ in
-                parsed = nil
-                load()
-            }
-            .onChange(of: fontSize) { _ in
-                parsed = nil
-                load()
-            }
-    }
-
-    private func load() {
-        if parsed != nil { return }
-        let key = "\(fontSize)|\(UIColor(color).description)|\(text)" as NSString
-        if let cached = Self.cache.object(forKey: key) {
-            parsed = cached
-            return
-        }
-        let t = text
-        let c = color
-        let f = fontSize
-        Task.detached(priority: .utility) {
-            let a = ANSIParser.attributed(
-                t,
-                baseFont: UIFont.monospacedSystemFont(ofSize: f, weight: .regular),
-                baseColor: UIColor(c)
-            )
-            Self.cache.setObject(a, forKey: key)
-            await MainActor.run { self.parsed = a }
-        }
-    }
-}
-
-private extension View {
-    @ViewBuilder
-    func ifLet<T>(_ value: T?, transform: (Self, T) -> some View) -> some View {
-        if let value {
-            transform(self, value)
-        } else {
-            self
-        }
     }
 }

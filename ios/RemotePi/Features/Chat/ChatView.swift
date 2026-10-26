@@ -1,35 +1,13 @@
 import SwiftUI
 import UIKit
 
-/// Bottom-of-content marker: its maxY in the scroll coordinate space is the
-/// REAL distance signal for auto-follow. Row onAppear/onDisappear flickered
-/// during LazyVStack churn and caused the 'yanked back to bottom' bug.
-private struct BottomMarkerKey: PreferenceKey {
-    static var defaultValue: CGFloat = .infinity
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = min(value, nextValue())
-    }
-}
-
-/// Bottom marker + one-shot offset clamp, extracted into a tiny view so the
-/// chat layout type-checks quickly.
-private struct BottomMarkerAndClamp: View {
-    let clampTrigger: Bool
-    let onClamped: () -> Void
-
-    var body: some View {
-        Color.clear.frame(height: 1)
-            .background(GeometryReader { g in
-                Color.clear.preference(
-                    key: BottomMarkerKey.self,
-                    value: g.frame(in: .named("chatScroll")).maxY
-                )
-            })
-            .background(ScrollBottomClamp(trigger: clampTrigger, onClamped: onClamped))
-    }
-}
-
-/// Chat conversation with streaming responses, tool activity and abort control.
+/// Chat conversation screen: SwiftUI chrome around the UIKit transcript.
+///
+/// Observation is split so views only re-render for what they show:
+/// - this view observes `ChatViewModel` (low-frequency state only);
+/// - the status banner / stats / toolbar control observe `ChatLiveStatus`;
+/// - the composer keeps its text in local `@State`;
+/// - transcript rows bypass SwiftUI entirely (Combine → UITableView).
 @MainActor
 struct ChatView: View {
     let server: ServerConfig
@@ -37,87 +15,12 @@ struct ChatView: View {
     private let client: APIClient
     @AppStorage("chatTextScale") private var textScale: Double = 1.0
     @Environment(\.theme) private var theme
-
-    @StateObject private var viewModel: ChatViewModel
-
-    @State private var scrolledToBottom = false
-    @State private var focusItem: ToolFocusItem?
-    @State private var showScrollToBottom = false
-    /// One-shot initial scroll + auto-follow throttle (offset-based follow).
-    @State private var didInitialScroll = false
-    @State private var lastAutoScroll = Date.distantPast
-    /// Measured from the real scroll offset (bottom marker vs viewport).
-    @State private var nearBottom = false
-    /// Initial offset clamp done.
-    @State private var didClampInitial = false
-    /// True while the user is actively dragging — the follow must never fight
-    /// an in-progress pan (that was the bottom stutter).
-    @State private var isUserScrolling = false
-    /// Composer focus state. Keyboard appearance shrinks the viewport, which
-    /// flips the offset-based nearBottom to false — without this, the follow
-    /// is blocked right after sending (the "jump up" after send).
-    @State private var composerFocused = false
-    /// Live-refreshed host-ownership state (banner stays current).
-    @State private var liveNow = false
-    @State private var livePid: Int?
-    /// Session is interactive only after history loaded AND the initial
-    /// bottom clamp finished — before that the view is dimmed and
-    /// non-interactive to avoid jittery jumps during load.
-    @State private var sessionReady = false
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.presentationMode) private var presentationMode
     @Environment(\.scenePhase) private var scenePhase
-    /// Focus mode (default ON): hides tool output, calls, notes AND thinking.
-    /// Focus mode fixed at hidden (tools collapsed) — no toggle by design.
-    /// Fresh key: never written by the old toggle, so it always defaults true.
-    @AppStorage("hideToolsPinned") private var hideTools = true
 
-    /// Cached visible list — recomputed only when messages or focus mode
-    /// change. `visibleMessages` used to be a computed property doing full
-    /// filter+copy over thousands of rows on EVERY render pass, freezing
-    /// scrolling for seconds after a session loads.
-    @State private var cachedVisible: [ChatMessage] = []
-    @State private var cachedSignature: String = ""
-
-    private var visibleMessages: [ChatMessage] {
-        let msgs = viewModel.messages
-        // Blank guard: when the tail is one huge tool loop, focus mode would
-        // render nothing — fall back to showing tool rows.
-        let focus = hideTools && !viewModel.focusModeFallback
-        let sig = "\(msgs.count)|\(msgs.last?.id ?? "")|\(focus)|\(viewModel.focusModeFallback)"
-        if sig != cachedSignature {
-            cachedSignature = sig
-            cachedVisible = Self.computeVisible(msgs, hideTools: focus)
-        }
-        return cachedVisible
-    }
-
-    private static func computeVisible(_ messages: [ChatMessage], hideTools: Bool) -> [ChatMessage] {
-        let base: [ChatMessage]
-        if hideTools {
-            base = messages
-                .filter { $0.role != .tool && !$0.isSystemNote }
-                .map { msg in
-                    guard msg.thinking != nil else { return msg }
-                    var m = msg
-                    m.thinking = nil
-                    return m
-                }
-        } else {
-            base = messages
-        }
-        return base.filter { msg in
-            if msg.role == .tool { return false } // pinned hidden: tools never render
-            // Focus mode hides tool-call chips, so an assistant message whose
-            // only content is tool calls (or nothing at all) renders as an
-            // empty gap. Drop it — its tool output bubble still shows.
-            if hideTools && msg.role == .assistant {
-                let textEmpty = msg.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                let thinkEmpty = msg.thinking?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
-                if textEmpty && thinkEmpty { return false }
-            }
-            return !msg.isBlankForDisplay
-        }
-    }
+    @StateObject private var viewModel: ChatViewModel
+    @State private var selectedText: SelectableText?
 
     init(server: ServerConfig, session: SessionSummary) {
         self.server = server
@@ -125,288 +28,26 @@ struct ChatView: View {
         let client = APIClient(baseURL: server.url ?? URL(string: "http://localhost")!,
                                token: server.token)
         self.client = client
-        _liveNow = State(initialValue: session.live == true)
-        _livePid = State(initialValue: session.livePid)
         _viewModel = StateObject(wrappedValue: ChatViewModel(client: client, sessionId: session.id))
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            if liveNow {
-                HStack(spacing: 6) {
-                    Image(systemName: "terminal")
-                    Text("Running in host terminal — external pi process\(livePid.map { " (pid \($0))" } ?? "")")
-                        .font(.caption2)
-                    Spacer()
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(theme.accent.opacity(0.15))
-            }
-            GeometryReader { geo in
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 12) {
-                        if viewModel.messages.isEmpty && viewModel.isLoadingHistory {
-                            HStack {
-                                ProgressView()
-                                Text("Loading messages…")
-                                    .font(.caption)
-                                    .foregroundColor(theme.secondaryText)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, 40)
-                        }
-                        if hideTools && !viewModel.messages.isEmpty && viewModel.messages.contains(where: { $0.role == .tool || $0.isSystemNote }) {
-                            Button {
-                                withAnimation { hideTools = false }
-                            } label: {
-                                Label("Tool output, thinking & notes hidden — tap to show", systemImage: "hammer")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            .padding(.vertical, 4)
-                        }
-                        ForEach(Array(visibleMessages.enumerated()), id: \.element.id) { index, message in
-                            MessageBubble(message: message, isStreaming: isStreaming(message),
-                                          hideToolCalls: hideTools && !viewModel.focusModeFallback,
-                                          onFocus: { item in focusItem = item },
-                                          onDiagnose: { diagnose($0) },
-                                          onFork: { forkFrom($0) })
-                            .equatable()
-                            .id(message.id)
-                            .onAppear {
-                                // Prefetch the previous page before the user
-                                // reaches the very top (smooth pagination).
-                                if index < 8 {
-                                    Task { await viewModel.loadMore() }
-                                }
-                            }
-                        }
-                        // Queued + offline bubbles render AFTER messages —
-                        // they are the newest pending content and belong at
-                        // the bottom (above the composer), not the top.
-                        ForEach(viewModel.queuedItems) { item in
-                            QueuedBubble(item: item) {
-                                Task { await viewModel.cancelQueued(item.id) }
-                            }
-                        }
-                        ForEach(viewModel.offlinePending) { item in
-                            OfflineBubble(text: item.text) {
-                                withAnimation { viewModel.discardOffline(item.id) }
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 12)
-                    // Bottom marker + reliable open-at-bottom clamp (extracted
-                    // so the type checker isn't overwhelmed).
-                    .background(BottomMarkerAndClamp(
-                        clampTrigger: !didClampInitial && !viewModel.messages.isEmpty,
-                        onClamped: {
-                            didClampInitial = true
-                            // ScrollBottomClamp signals only after the scroll
-                            // view is genuinely at the bottom (lazy growth
-                            // settled) — undim + enable interaction here.
-                            withAnimation(.easeIn(duration: 0.15)) { sessionReady = true }
-                        }
-                    ))
-
-                    // Gesture-aware follow: never jump while the user drags.
-                    Color.clear.frame(height: 1)
-                        .background(ScrollPanDetector { active in
-                            isUserScrolling = active
-                        })
-                }
-                .coordinateSpace(name: "chatScroll")
-                .overlay(alignment: .bottomTrailing) {
-                    if showScrollToBottom {
-                        Button {
-                            scrollToBottom(proxy, animated: true)
-                        } label: {
-                            Image(systemName: "arrow.down")
-                                .font(.system(size: 16, weight: .semibold))
-                                .frame(width: 38, height: 38)
-                                .background(theme.secondaryBackground.opacity(0.95))
-                                .clipShape(Circle())
-                                .overlay(Circle().stroke(theme.border, lineWidth: 0.5))
-                                .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
-                        }
-                        .padding(.trailing, 14)
-                        .padding(.bottom, 10)
-                    }
-                }
-                // At-bottom is measured from the REAL scroll offset (bottom
-                // marker vs viewport height) — immune to LazyVStack row
-                // onAppear/onDisappear flicker, so scrolling up is never yanked
-                // back. Follow: one-shot initial, then throttled 250ms, both
-                // non-animated, only while within 200pt of the bottom.
-                // Marker only updates STATE (nearBottom for the gate + button
-                // visibility) — it must NOT drive scrolling: programmatic
-                // scrolls move the marker, which would self-trigger follow
-                // forever (the infinite-scroll-on-open loop).
-                .onPreferenceChange(BottomMarkerKey.self) { markerY in
-                    let distance = markerY - geo.size.height
-                    nearBottom = distance <= 200
-                    viewModel.setViewportNearBottom(nearBottom)
-                    let showBtn = distance > 200
-                    if showBtn != showScrollToBottom { showScrollToBottom = showBtn }
-                }
-                // Follow fires ONLY on real new messages (count change), gated
-                // by being near the bottom and the user not scrolling. The
-                // one-shot didInitialScroll lands the first page at the bottom.
-                .onChange(of: viewModel.messages.count) { _ in
-                    // composerFocused: the keyboard shrank the viewport, which
-                    // flips nearBottom false even though the user was at the
-                    // bottom when they hit send — keep following.
-                    guard (nearBottom || composerFocused), !isUserScrolling else { return }
-                    if !didInitialScroll {
-                        didInitialScroll = true
-                        scrollToBottom(proxy, animated: false)
-                    } else if Date().timeIntervalSince(lastAutoScroll) > 0.25 {
-                        lastAutoScroll = Date()
-                        // Defer one runloop pass: the row for the new message
-                        // may not be realized yet; scrolling immediately can
-                        // anchor to the previous layout and jump.
-                        DispatchQueue.main.async {
-                            scrollToBottom(proxy, animated: false)
-                        }
-                    }
-                }
-                .onChange(of: viewModel.queuedItems.count) { _ in
-                    // A pending chip appeared (send while busy): keep the view
-                    // pinned to the bottom so the chip is visible.
-                    guard nearBottom || composerFocused, !isUserScrolling else { return }
-                    DispatchQueue.main.async {
-                        scrollToBottom(proxy, animated: false)
-                    }
-                }
-                .onChange(of: viewModel.historyEpoch) { _ in
-                    // History was replaced wholesale (initial load or the
-                    // visible-filter refetch). Re-arm the bottom clamp so the
-                    // view lands at absolute bottom on the FINAL content.
-                    // Scroll to the last VISIBLE row — messages.last may be a
-                    // hidden tool row whose id isn't in the list (scrollTo
-                    // would silently no-op and leave the view off-bottom).
-                    didClampInitial = false
-                    didInitialScroll = false
-                    if let last = visibleMessages.last {
-                        DispatchQueue.main.async {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        }
-                    }
-                }
-                .onChange(of: viewModel.prependAnchor) { anchor in
-                    guard let anchor else { return }
-                    // The stable old-first-row ID remains in the list after a
-                    // prepend. Scroll to it after TWO layout passes so the
-                    // inserted rows are realized — a single async hop races
-                    // LazyVStack layout and lands the viewport at the wrong
-                    // offset (the scroll-up jump).
-                    DispatchQueue.main.async {
-                        DispatchQueue.main.async {
-                            proxy.scrollTo(anchor, anchor: .top)
-                            viewModel.consumePrependAnchor()
-                        }
-                    }
-                }
-            }
-            }
-            // Opaque loading cover until history is loaded and the initial
-            // bottom clamp settled — prevents jittery jump during load.
-            .overlay(
-                Group {
-                    if !sessionReady {
-                        ZStack {
-                            theme.background.ignoresSafeArea()
-                            VStack(spacing: 14) {
-                                Image(systemName: "message.circle.fill")
-                                    .font(.system(size: 44))
-                                    .foregroundColor(theme.accent.opacity(0.6))
-                                ProgressView()
-                                    .scaleEffect(1.1)
-                                Text("Loading conversation…")
-                                    .font(.footnote)
-                                    .foregroundColor(theme.secondaryText)
-                            }
-                        }
-                        .transition(.opacity)
-                    }
-                }
-            )
-            .disabled(!sessionReady)
-
+            HostOwnershipBanner(status: viewModel.status, client: client, sessionId: session.id,
+                                initialLive: session.live == true, initialPid: session.livePid)
+            TranscriptView(viewModel: viewModel,
+                           theme: theme,
+                           textScale: textScale,
+                           contentSize: dynamicTypeSize.uiContentSizeCategory,
+                           actions: transcriptActions)
+                .overlay { loadingOverlay }
         }
-        // Composer + status bars live in the bottom safe-area inset: iOS 15
-        // keyboard avoidance is clean (no blank band below the input), and the
-        // fixed-height reservation above the input stops viewport jumps.
+        // Composer + status bars live in the bottom safe-area inset: they stay
+        // docked above the keyboard and the transcript ends exactly at their
+        // top edge (no reserved blank slots → no gaps).
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 0) {
-                if let question = viewModel.pendingQuestion {
-                    QuestionCardView(viewModel: viewModel, question: question)
-                }
-                if let work = viewModel.workingText {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                            .tint(theme.accent)
-                        Text(work)
-                            .font(.caption)
-                            .foregroundColor(theme.secondaryText)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(theme.accent.opacity(0.10))
-                } else {
-                    Color.clear.frame(height: 28)
-                }
-
-                if let note = viewModel.queuedNote {
-                    HStack(spacing: 6) {
-                        Image(systemName: "clock.arrow.circlepath")
-                        Text(note)
-                            .font(.caption2)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Color.orange.opacity(0.15))
-                } else if viewModel.workingText == nil {
-                    // Collapse the empty queued slot when the working banner is
-                    // showing — no 26pt gap between it and the input.
-                    Color.clear.frame(height: 26)
-                }
-
-                // pi 0.85 stats strip: context % + tokens + live cost.
-                // Only rendered when data exists — zero chrome otherwise.
-                if viewModel.stats != nil || viewModel.liveUsage != nil {
-                    HStack(spacing: 10) {
-                        if let pct = viewModel.stats?.contextPercent {
-                            Label("\(Int(pct))%", systemImage: "gauge.medium")
-                                .font(.caption2.monospacedDigit())
-                                .foregroundColor(pct > 90 ? .red : pct > 70 ? .orange : theme.secondaryText)
-                        }
-                        if let tokens = viewModel.stats?.totalTokens, tokens > 0 {
-                            Text("\(tokens.formatted()) tok")
-                                .font(.caption2.monospacedDigit())
-                                .foregroundColor(theme.secondaryText)
-                        }
-                        if let cost = viewModel.stats?.cost, cost > 0 {
-                            Text(String(format: "$%.2f", cost))
-                                .font(.caption2.monospacedDigit())
-                                .foregroundColor(theme.secondaryText)
-                        }
-                        Spacer()
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 3)
-                }
-
-                ComposerView(viewModel: viewModel)
-            }
+            ChatBottomBar(viewModel: viewModel, status: viewModel.status)
         }
-        .environment(\.chatTextScale, textScale)
         .background(theme.background)
         .navigationTitle(session.name)
         .navigationBarTitleDisplayMode(.inline)
@@ -415,627 +56,248 @@ struct ChatView: View {
                 HStack(spacing: 12) {
                     Menu {
                         Button {
-                            forkFrom(nil)
+                            viewModel.requestFork(entryId: nil, name: "fork of \(session.name)")
                         } label: {
                             Label("Fork at latest message", systemImage: "arrow.branch")
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
-                    if viewModel.isStreaming {
-                        Button {
-                            Task { await viewModel.abort() }
-                        } label: {
-                            Image(systemName: "stop.circle")
-                                .foregroundColor(.red)
-                        }
-                    } else {
-                        statusDot
-                    }
+                    .accessibilityLabel("More actions")
+                    ToolbarStatusControl(status: viewModel.status,
+                                         connected: viewModel.connectionState == .connected,
+                                         onAbort: { viewModel.abort() })
                 }
             }
         }
         .task { await viewModel.start() }
-        .task {
-            // Keep the host-ownership banner current.
-            while !Task.isCancelled {
-                if let summary = try? await client.fetchSession(session.id) {
-                    liveNow = summary.live == true
-                    livePid = summary.livePid
-                }
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
-            composerFocused = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
-            composerFocused = false
-        }
         .onChange(of: scenePhase) { phase in
+            // Only a real background transition suspends the network:
+            // `.inactive` (control centre, app switcher peek, alerts) must not
+            // drop the stream or disable sending.
             switch phase {
+            case .background:
+                viewModel.suspendNetwork()
             case .active:
                 viewModel.resumeNetwork()
-            case .inactive, .background:
-                viewModel.suspendNetwork()
-            @unknown default:
+            default:
                 break
             }
         }
+        .onChange(of: viewModel.shouldDismiss) { dismiss in
+            if dismiss { presentationMode.wrappedValue.dismiss() }
+        }
         .onDisappear { viewModel.stop() }
-        .alert("Error", isPresented: Binding(
-            get: { viewModel.errorMessage != nil },
-            set: { if !$0 { viewModel.errorMessage = nil } }
-        )) {
+        .alert(alertTitle, isPresented: alertBinding) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(viewModel.errorMessage ?? "")
+            Text(viewModel.errorMessage ?? viewModel.infoMessage ?? "")
         }
-        .fullScreenCover(item: $focusItem) { item in
-            ToolFocusView(item: item)
+        .sheet(item: $selectedText) { selection in
+            SelectableTextSheet(text: selection.text, theme: theme,
+                                fontSize: 17 * CGFloat(textScale))
         }
     }
 
-    private var statusDot: some View {
-        Circle()
-            .fill(viewModel.connectionState == .connected ? Color.green : Color.orange)
-            .frame(width: 10, height: 10)
+    private var transcriptActions: TranscriptActions {
+        let vm = viewModel
+        let forkName = "fork of \(session.name)"
+        let selection = $selectedText
+        return TranscriptActions(
+            loadMore: { vm.loadMore() },
+            nearBottomChanged: { vm.setViewportNearBottom($0) },
+            cancelQueued: { vm.cancelQueued($0) },
+            discardOffline: { id in
+                if let uuid = UUID(uuidString: id) { vm.discardOffline(uuid) }
+            },
+            fork: { entryId in vm.requestFork(entryId: entryId, name: forkName) },
+            selectText: { text in selection.wrappedValue = SelectableText(text: text) }
+        )
     }
 
-    private func isStreaming(_ message: ChatMessage) -> Bool {
-        viewModel.isStreaming && message.id == viewModel.messages.last?.id
-    }
-
-    /// Long-press on a bubble copies its classification to the clipboard so
-    /// misrenderings can be reported precisely (role/toolName/text head).
-    private func diagnose(_ message: ChatMessage) {
-        let head = String(message.text.prefix(140)).replacingOccurrences(of: "\n", with: " ")
-        let diag = "role=\(message.role.rawValue) toolName=\(message.toolName ?? "nil") isError=\(message.isError) text=\(head)"
-        UIPasteboard.general.string = diag
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        viewModel.errorMessage = "Copied: \(diag)"
-    }
-
-    /// Fork the session from a message (entryId) or the latest user message.
-    private func forkFrom(_ message: ChatMessage?) {
-        Task {
-            do {
-                let (forked, text) = try await client.forkSession(
-                    session.id,
-                    entryId: message?.entryId,
-                    name: "fork of \(session.name)"
-                )
-                viewModel.errorMessage = "Forked → \(forked.name)" + (text.map { ": \(String($0.prefix(40)))" } ?? "")
-                // Pop back to the session list — it refreshes on appear.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                    presentationMode.wrappedValue.dismiss()
+    /// Small centered spinner only while there is no data yet; retry UI on
+    /// failure; nothing at all once rows exist (no opaque cover).
+    @ViewBuilder
+    private var loadingOverlay: some View {
+        if viewModel.transcriptIsEmpty {
+            switch viewModel.loadPhase {
+            case .loading:
+                ProgressView()
+                    .accessibilityLabel("Loading conversation")
+            case .failed(let message):
+                VStack(spacing: 10) {
+                    Text("Couldn't load the conversation")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundColor(theme.text)
+                    Text(message)
+                        .font(.caption)
+                        .foregroundColor(theme.secondaryText)
+                        .multilineTextAlignment(.center)
+                    Button("Retry") { viewModel.retryLoad() }
+                        .font(.footnote.weight(.semibold))
                 }
-            } catch is CancellationError {
-                // Fork abandoned (nav away) — not an error.
-            } catch {
-                viewModel.errorMessage = error.localizedDescription
+                .padding(24)
+            case .loaded:
+                Text("No messages yet")
+                    .font(.footnote)
+                    .foregroundColor(theme.secondaryText)
             }
         }
     }
 
-    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
-        // Anchor to the true bottom-most row. The list renders, in order:
-        // visibleMessages, queued chips, offline bubbles. The bottom-most row
-        // is an offline bubble, else a queued chip, else the last message.
-        // Scrolling to a row ABOVE the chip left the chip below the fold —
-        // the "not at bottom after send" bug.
-        if viewModel.offlinePending.isEmpty, let chip = viewModel.queuedItems.last {
-            // Chips render after messages; prefer the chip when present.
-            proxy.scrollTo(chip.id, anchor: .bottom)
-            return
-        }
-        if let last = visibleMessages.last {
-            if animated {
-                withAnimation(.easeOut(duration: 0.25)) {
-                    proxy.scrollTo(last.id, anchor: .bottom)
+    private var alertTitle: String {
+        viewModel.errorMessage != nil ? "Error" : "Remote Pi"
+    }
+
+    private var alertBinding: Binding<Bool> {
+        Binding(
+            get: { viewModel.errorMessage != nil || viewModel.infoMessage != nil },
+            set: { presented in
+                if !presented {
+                    viewModel.errorMessage = nil
+                    viewModel.infoMessage = nil
                 }
-            } else {
-                proxy.scrollTo(last.id, anchor: .bottom)
             }
-        }
+        )
     }
 }
 
-/// One message bubble: user right, assistant/tool left, markdown rendering.
-struct MessageBubble: View, Equatable {
-    static func == (lhs: MessageBubble, rhs: MessageBubble) -> Bool {
-        lhs.message == rhs.message
-            && lhs.isStreaming == rhs.isStreaming
-            && lhs.hideToolCalls == rhs.hideToolCalls
-    }
-    let message: ChatMessage
-    let isStreaming: Bool
-    var hideToolCalls = false
-    var onFocus: (ToolFocusItem) -> Void = { _ in }
-    var onDiagnose: (ChatMessage) -> Void = { _ in }
-    var onFork: (ChatMessage) -> Void = { _ in }
-    @State private var noteExpanded = false
-    /// Long user inputs (logs/dumps) collapse to a preview; tap to expand.
-    @State private var expanded = false
-    @Environment(\.chatTextScale) private var textScale
-    @Environment(\.theme) private var theme
-    /// Parsed markdown (off-main, cached by text) — avoids first-frame stutter
-    /// when opening a session with many markdown-heavy messages.
-    @State private var parsedText: AttributedString?
+// MARK: - Bottom bar (question card, status banner, queue note, stats, composer)
 
-    private func scaled(_ base: CGFloat) -> CGFloat { base * CGFloat(textScale) }
-
-    init(message: ChatMessage, isStreaming: Bool, hideToolCalls: Bool = false,
-         onFocus: @escaping (ToolFocusItem) -> Void = { _ in },
-         onDiagnose: @escaping (ChatMessage) -> Void = { _ in },
-         onFork: @escaping (ChatMessage) -> Void = { _ in }) {
-        self.message = message
-        self.isStreaming = isStreaming
-        self.hideToolCalls = hideToolCalls
-        self.onFocus = onFocus
-        self.onDiagnose = onDiagnose
-        self.onFork = onFork
-    }
-
-    var body: some View {
-        HStack(alignment: .bottom) {
-            if message.isSystemNote {
-                systemNoteView
-                    // Gestures live on the BUBBLE, not the row: a row-wide
-                    // contentShape + contextMenu intercepts touches in the
-                    // empty gutters (e.g. left of user bubbles) and blocks
-                    // scrolling there.
-                    .contentShape(Rectangle())
-                    .onLongPressGesture { onDiagnose(message) }
-                    .contextMenu {
-                        Button { onFocus(.result(message)) } label: {
-                            Label("Open details", systemImage: "arrow.up.left.and.arrow.down.right")
-                        }
-                        Button { onDiagnose(message) } label: {
-                            Label("Copy classification", systemImage: "doc.on.doc")
-                        }
-                    }
-            } else {
-                if message.role == .user { Spacer(minLength: 60) }
-
-                if message.role == .user {
-                    userBubble
-                        .contentShape(Rectangle())
-                        .onLongPressGesture { onDiagnose(message) }
-                        .contextMenu {
-                            if message.entryId != nil {
-                                Button { onFork(message) } label: {
-                                    Label("Fork from here", systemImage: "arrow.branch")
-                                }
-                            }
-                            Button { onFocus(.result(message)) } label: {
-                                Label("Open details", systemImage: "arrow.up.left.and.arrow.down.right")
-                            }
-                            Button { onDiagnose(message) } label: {
-                                Label("Copy classification", systemImage: "doc.on.doc")
-                            }
-                        }
-                } else if message.role == .tool {
-                    toolBubble
-                        .contentShape(Rectangle())
-                        .onLongPressGesture { onDiagnose(message) }
-                        .contextMenu {
-                            Button { onFocus(.result(message)) } label: {
-                                Label("Open details", systemImage: "arrow.up.left.and.arrow.down.right")
-                            }
-                            Button { onDiagnose(message) } label: {
-                                Label("Copy classification", systemImage: "doc.on.doc")
-                            }
-                        }
-                } else if message.isBlankForDisplay && !isStreaming {
-                    // Blank assistant bubbles (tool-call-only or empty) render
-                    // nothing — even an empty VStack contributes spacing.
-                    Color.clear.frame(height: 0)
-                } else {
-                    assistantBubble
-                        .contentShape(Rectangle())
-                        .onLongPressGesture { onDiagnose(message) }
-                        .contextMenu {
-                            Button { onFocus(.result(message)) } label: {
-                                Label("Open details", systemImage: "arrow.up.left.and.arrow.down.right")
-                            }
-                            Button { onDiagnose(message) } label: {
-                                Label("Copy classification", systemImage: "doc.on.doc")
-                            }
-                        }
-                }
-
-                // Layout spacer (non-interactive): pushes assistant/tool
-                // content left and fills the rest of the row. Pure layout —
-                // no gesture attached, fully touch-transparent.
-                if message.role != .user { Spacer(minLength: 24) }
-            }
-        }
-    }
-
-    /// pi background-shell notification / prune summary — rendered like a
-    /// tool call: left-aligned monospace block with icon + expandable output.
-    private var systemNoteView: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "note.text")
-                .font(.caption)
-                .foregroundColor(.teal)
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(noteTitle)
-                        .font(.caption.weight(.bold))
-                    Spacer(minLength: 8)
-                    Button {
-                        withAnimation { noteExpanded.toggle() }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text(noteExpanded ? "less" : "more")
-                            Image(systemName: noteExpanded ? "chevron.up" : "chevron.down")
-                        }
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                    }
-                }
-                if !message.text.isEmpty {
-                    Text(message.text)
-                        .font(.system(size: scaled(11), design: .monospaced))
-                        .foregroundColor(.primary)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .lineLimit(noteExpanded ? nil : 6)
-                        .padding(8)
-                        .background(theme.secondaryBackground)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(theme.secondaryBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-
-    private var noteTitle: String {
-        if message.text.contains("[bg-") { return "Background shell" }
-        if message.text.contains("Tool Call") { return "Prune summary" }
-        return "System note"
-    }
-
-    private var userBubble: some View {
-        Group {
-            // Long inputs (pasted logs, dumps) collapse to a preview with an
-            // expander — a 500-line paste otherwise floods the whole screen.
-            if isLongUserText {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(expanded ? message.text : message.text.prefix(UserTextCollapse.previewChars) + "\n…")
-                        .font(.system(size: scaled(17)))
-                        .lineLimit(expanded ? nil : UserTextCollapse.previewLines)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .background(theme.userBubble)
-                        .foregroundColor(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .textSelection(.enabled)
-                    Button {
-                        withAnimation(.easeOut(duration: 0.2)) { expanded.toggle() }
-                    } label: {
-                        let lineCount = message.text.split(separator: "\n", omittingEmptySubsequences: false).count
-                        Label(expanded ? "Show less" : "Show all \(lineCount) lines",
-                              systemImage: expanded ? "chevron.up" : "chevron.down")
-                            .font(.caption.weight(.semibold))
-                            .foregroundColor(.white.opacity(0.85))
-                    }
-                    .padding(.leading, 6)
-                }
-            } else {
-                Text(message.text)
-                    .font(.system(size: scaled(17)))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(theme.userBubble)
-                    .foregroundColor(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                    .textSelection(.enabled)
-            }
-        }
-        .id(message.id)
-    }
-
-    /// Collapse thresholds for long user inputs (logs, dumps, pastes).
-    private enum UserTextCollapse {
-        static let thresholdChars = 1_200
-        static let thresholdLines = 20
-        static let previewChars = 800
-        static let previewLines = 12
-    }
-
-    private var isLongUserText: Bool {
-        message.role == .user
-            && (message.text.count > UserTextCollapse.thresholdChars
-                || message.text.split(separator: "\n", omittingEmptySubsequences: false).count > UserTextCollapse.thresholdLines)
-    }
-
-    private var assistantBubble: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let thinking = message.thinking, !thinking.isEmpty {
-                ThinkingView(text: thinking)
-            }
-            if !message.text.isEmpty {
-                if isStreaming {
-                    // Plain text while streaming: markdown re-parse per delta is
-                    // O(n²) and causes scroll lag on long messages.
-                    Text(message.text)
-                        .font(.system(size: scaled(17)))
-                        .textSelection(.enabled)
-                } else {
-                    Text(displayText)
-                        .font(.system(size: scaled(17)))
-                        .textSelection(.enabled)
-                        .onAppear { loadParsedText() }
-                        .onChange(of: message.text) { _ in
-                            parsedText = nil
-                            if !isStreaming { loadParsedText() }
-                        }
-                        .onChange(of: isStreaming) { streaming in
-                            if !streaming { parsedText = nil; loadParsedText() }
-                        }
-                }
-            } else if isStreaming && message.thinking?.isEmpty != false {
-                StreamingDots()
-            }
-            if !message.toolCalls.isEmpty && !hideToolCalls {
-                ForEach(Array(message.toolCalls.enumerated()), id: \.offset) { _, call in
-                    ToolCallChip(call: call) {
-                        onFocus(.call(name: call.name, arguments: call.argumentsText))
-                    }
-                }
-            }
-        }
-        // No full-width frame here: with maxWidth: .infinity the bubble's
-        // contentShape + contextMenu covered the whole right side of the row
-        // and intercepted touches. The outer HStack Spacer provides layout;
-        // hit-testing stays limited to actual content.
-        .padding(.leading, 4)
-    }
-
-    /// Tool output — monospace block, mirrors the pi terminal's tool section.
-    /// Rows stay light: inline preview capped, full output opens in focus mode.
-    private var toolBubble: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: message.isError ? "exclamationmark.triangle.fill" : "hammer.fill")
-                .font(.caption)
-                .foregroundColor(message.isError ? .red : .orange)
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(message.toolName ?? "tool")
-                        .font(.caption.weight(.bold))
-                    Spacer(minLength: 8)
-                    if isStreaming && message.text.isEmpty {
-                        ProgressView().controlSize(.mini)
-                    }
-                    if message.isError {
-                        Text("failed")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundColor(.red)
-                    }
-                    Button {
-                        onFocus(.result(message))
-                    } label: {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                if !message.text.isEmpty {
-                    if isStreaming {
-                        Text(message.text)
-                            .font(.system(size: scaled(11), design: .monospaced))
-                            .foregroundColor(message.isError ? .red : .primary)
-                            .lineLimit(6)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(8)
-                            .background(theme.secondaryBackground)
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                    } else {
-                        TerminalText(text: message.text, color: message.isError ? .red : theme.terminalText, fontSize: scaled(11))
-                            .textSelection(.enabled)
-                            .lineLimit(6)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(8)
-                            .background(theme.secondaryBackground)
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                    }
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(message.isError ? Color.red.opacity(0.08) : theme.secondaryBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .contentShape(Rectangle())
-        .onTapGesture {
-            onFocus(.result(message))
-        }
-    }
-
-    /// Plain text until the off-main markdown parse lands (cached by text).
-    private var displayText: AttributedString {
-        parsedText ?? AttributedString(message.text)
-    }
-
-    private static let markdownCache = NSCache<NSString, NSAttributedString>()
-
-    /// Serial parse queue — markdown/ANSI parses for visible bubbles were
-    /// all spawned as concurrent `.userInitiated` tasks on session open,
-    /// saturating the cooperative pool and starving main-actor layout
-    /// (the multi-second freeze after opening a session). A serial queue
-    /// keeps parses off-main without the thundering herd.
-    @MainActor private static let parseGate = ParseGate()
-
-    @MainActor private final class ParseGate {
-        private var chain: Task<Void, Never>?
-
-        func enqueue(_ work: @escaping @Sendable () async -> Void) {
-            chain = Task { [prev = chain] in
-                await prev?.value
-                await Task.detached(priority: .utility, operation: work).value
-            }
-        }
-    }
-
-    private func loadParsedText() {
-        if parsedText != nil { return }
-        let text = message.text
-        if let cached = Self.markdownCache.object(forKey: text as NSString) {
-            parsedText = AttributedString(cached)
-            return
-        }
-        // MessageBubble is a struct — capture the @State box identity-safe via
-        // the setter only. If the bubble is gone by completion, the write is
-        // simply dropped (no leak, no crash).
-        Self.parseGate.enqueue {
-            let parsed = MessageBubble.parseMarkdown(text)
-            let boxed = NSAttributedString(attributedString: parsed)
-            Self.markdownCache.setObject(boxed, forKey: text as NSString)
-            await MainActor.run { parsedText = AttributedString(boxed) }
-        }
-    }
-
-    private static func parseMarkdown(_ text: String) -> NSAttributedString {
-        NSAttributedString((try? AttributedString(
-            markdown: Self.escapeFalseTildes(text),
-            options: AttributedString.MarkdownParsingOptions(
-                interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        )) ?? AttributedString(text))
-    }
-
-    /// Neutralize ALL tildes outside code spans so the Markdown parser never
-    /// renders strikethrough. GFM treats BOTH `~~x~~` and single-tilde `~x~`
-    /// as delimiters — paths (`~/x`), approximations (`~5s`), and diff text
-    /// routinely contain single tildes that pair up across a paragraph.
-    /// Intentional strikethrough is rare in coding-agent output; it degrades
-    /// to the literal `~~text~~`, which is acceptable and unambiguous.
-    private static func escapeFalseTildes(_ text: String) -> String {
-        guard text.contains("~") else { return text }
-        var out = ""
-        out.reserveCapacity(text.count + 16)
-        var inBackticks = false
-        for ch in text {
-            if ch == "`" {
-                inBackticks.toggle()
-                out.append(ch)
-            } else if ch == "~" && !inBackticks {
-                out.append("\\~")
-            } else {
-                out.append(ch)
-            }
-        }
-        return out
-    }
-
-    private func rendered(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: Self.escapeFalseTildes(text),
-                               options: AttributedString.MarkdownParsingOptions(
-                                   interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
-    }
-}
-
-/// Collapsible thinking block (iOS 15: manual expander).
-struct ThinkingView: View {
-    let text: String
-    @State private var expanded = false
-    @Environment(\.chatTextScale) private var textScale
+struct ChatBottomBar: View {
+    @ObservedObject var viewModel: ChatViewModel
+    @ObservedObject var status: ChatLiveStatus
     @Environment(\.theme) private var theme
 
-    private func scaled(_ base: CGFloat) -> CGFloat { base * CGFloat(textScale) }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Button {
-                withAnimation { expanded.toggle() }
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9))
-                    Text("Thinking")
-                        .font(.caption.weight(.medium))
+        VStack(spacing: 0) {
+            if let question = viewModel.pendingQuestion {
+                QuestionCardView(viewModel: viewModel, question: question)
+            }
+            if let work = status.workingText {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(theme.accent)
+                    Text(work)
+                        .font(.caption)
+                        .foregroundColor(theme.secondaryText)
                     Spacer()
                 }
-                .foregroundColor(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(theme.accent.opacity(0.10))
+                .accessibilityElement(children: .combine)
             }
-            if expanded {
-                TerminalText(text: text, color: theme.secondaryText, fontSize: scaled(11))
-                    .padding(8)
-                    .background(theme.secondaryBackground)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
-        }
-    }
-}
-
-/// Tool-call chip with collapsible arguments + focus-mode expand.
-struct ToolCallChip: View {
-    let call: ToolCall
-    var onFocus: () -> Void = {}
-    @State private var expanded = false
-    @Environment(\.chatTextScale) private var textScale
-    @Environment(\.theme) private var theme
-
-    private func scaled(_ base: CGFloat) -> CGFloat { base * CGFloat(textScale) }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 4) {
-                Image(systemName: "hammer")
-                    .font(.system(size: 10))
-                Text(call.name)
-                    .font(.caption.weight(.semibold))
-                Spacer()
-                Button {
-                    onFocus()
-                } label: {
-                    Image(systemName: "arrow.up.left.and.arrow.down.right")
-                        .font(.system(size: 9))
-                        .foregroundColor(.secondary)
+            if let note = viewModel.queuedNote {
+                HStack(spacing: 6) {
+                    Image(systemName: "clock.arrow.circlepath")
+                    Text(note)
+                        .font(.caption2)
+                    Spacer()
                 }
-                Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 9))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.orange.opacity(0.15))
+                .accessibilityElement(children: .combine)
             }
-            if expanded && !call.argumentsText.isEmpty {
-                TerminalText(text: call.argumentsText, color: theme.secondaryText, fontSize: scaled(11))
-                    .lineLimit(8)
+            // pi 0.85 stats strip: context % + tokens + cost. Only rendered
+            // when data exists — zero chrome otherwise.
+            if status.stats != nil || status.hasUsage {
+                HStack(spacing: 10) {
+                    if let pct = status.stats?.contextPercent {
+                        Label("\(Int(pct))%", systemImage: "gauge.medium")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundColor(pct > 90 ? .red : pct > 70 ? .orange : theme.secondaryText)
+                            .accessibilityLabel("Context \(Int(pct)) percent used")
+                    }
+                    if let tokens = status.stats?.totalTokens, tokens > 0 {
+                        Text("\(tokens.formatted()) tok")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundColor(theme.secondaryText)
+                    }
+                    if let cost = status.stats?.cost, cost > 0 {
+                        Text(String(format: "$%.2f", cost))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundColor(theme.secondaryText)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 3)
             }
-        }
-        .padding(8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(theme.secondaryBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .contentShape(Rectangle())
-        .onTapGesture {
-            withAnimation { expanded.toggle() }
+            ComposerView { text in viewModel.send(text) }
         }
     }
 }
 
-/// Typing indicator while a stream has no text yet.
-struct StreamingDots: View {
-    @State private var on = false
+/// Stop button while the agent works, otherwise the connection dot.
+struct ToolbarStatusControl: View {
+    @ObservedObject var status: ChatLiveStatus
+    let connected: Bool
+    let onAbort: () -> Void
 
     var body: some View {
-        HStack(spacing: 5) {
-            ForEach(0..<3, id: \.self) { i in
-                Circle()
-                    .fill(Color.secondary)
-                    .frame(width: 6, height: 6)
-                    .opacity(on ? 1 : 0.3)
-                    .animation(.easeInOut(duration: 0.5).repeatForever()
-                        .delay(Double(i) * 0.15), value: on)
+        if status.isBusy {
+            Button(action: onAbort) {
+                Image(systemName: "stop.circle")
+                    .foregroundColor(.red)
+            }
+            .accessibilityLabel("Stop the agent")
+        } else {
+            Circle()
+                .fill(connected ? Color.green : Color.orange)
+                .frame(width: 10, height: 10)
+                .accessibilityLabel(connected ? "Connected" : "Connecting")
+        }
+    }
+}
+
+/// "Running in host terminal" banner. Driven by contract-v2
+/// `agent_status.owner` when available, plus a slow (30s), equality-gated
+/// session poll for v1 servers — it re-renders only itself.
+struct HostOwnershipBanner: View {
+    @ObservedObject var status: ChatLiveStatus
+    let client: APIClient
+    let sessionId: String
+    @Environment(\.theme) private var theme
+    @State private var live: Bool
+    @State private var pid: Int?
+
+    init(status: ChatLiveStatus, client: APIClient, sessionId: String, initialLive: Bool, initialPid: Int?) {
+        _status = ObservedObject(wrappedValue: status)
+        self.client = client
+        self.sessionId = sessionId
+        _live = State(initialValue: initialLive)
+        _pid = State(initialValue: initialPid)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if live || status.hostOwned {
+                HStack(spacing: 6) {
+                    Image(systemName: "terminal")
+                    Text("Running in host terminal — external pi process\(pid.map { " (pid \($0))" } ?? "")")
+                        .font(.caption2)
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(theme.accent.opacity(0.15))
+                .accessibilityElement(children: .combine)
             }
         }
-        .onAppear { on = true }
-        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .task {
+            while !Task.isCancelled {
+                if let summary = try? await client.fetchSession(sessionId) {
+                    let isLive = summary.live == true
+                    if live != isLive { live = isLive }
+                    if pid != summary.livePid { pid = summary.livePid }
+                }
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+            }
+        }
     }
 }
 
@@ -1054,7 +316,7 @@ struct QuestionCardView: View {
                     .font(.caption.weight(.semibold))
                 Spacer()
                 Button {
-                    Task { await viewModel.cancelQuestion() }
+                    viewModel.cancelQuestionAction()
                 } label: {
                     Text("Cancel").font(.caption)
                 }
@@ -1092,7 +354,7 @@ struct QuestionCardView: View {
             .frame(maxHeight: 260)
 
             Button {
-                Task { await viewModel.submitQuestion() }
+                viewModel.submitQuestionAction()
             } label: {
                 Text("Submit")
                     .font(.subheadline.weight(.semibold))
@@ -1142,32 +404,46 @@ struct QuestionCardView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 
-/// Composer: text field + send/stop button + connection hint.
+/// Composer: the draft lives in LOCAL state, so typing re-renders only this
+/// view (never the chat screen or the transcript).
 struct ComposerView: View {
-    @ObservedObject var viewModel: ChatViewModel
+    let onSend: (String) -> Void
+    @State private var text = ""
     @Environment(\.theme) private var theme
+
+    init(onSend: @escaping (String) -> Void) {
+        self.onSend = onSend
+    }
+
+    private var canSend: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             Divider()
             HStack(alignment: .bottom, spacing: 10) {
-                TextField("Message…", text: $viewModel.pendingText)
+                TextField("Message…", text: $text)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .background(theme.secondaryBackground)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .accessibilityLabel("Message")
 
                 Button {
-                    Task.detached { await viewModel.send(viewModel.pendingText) }
+                    let draft = text
+                    text = ""
+                    onSend(draft)
                 } label: {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.system(size: 30))
                 }
-                .disabled(viewModel.pendingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                          || viewModel.connectionState == .disconnected)
+                .disabled(!canSend)
+                .accessibilityLabel("Send")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -1176,83 +452,84 @@ struct ComposerView: View {
     }
 }
 
+// MARK: - Select Text sheet
 
-/// A message held locally while offline — sent automatically on reconnect.
-struct OfflineBubble: View {
+struct SelectableText: Identifiable {
+    let id = UUID()
     let text: String
-    var onDiscard: () -> Void = {}
-    @Environment(\.chatTextScale) private var textScale
+}
+
+/// Full-text sheet with native selection (the transcript rows themselves
+/// carry no competing gestures).
+struct SelectableTextSheet: View {
+    let text: String
+    let theme: AppTheme
+    let fontSize: CGFloat
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        HStack {
-            Spacer(minLength: 60)
-            VStack(alignment: .trailing, spacing: 4) {
-                HStack(spacing: 5) {
-                    Image(systemName: "wifi.slash")
-                    Text("waiting for connection")
-                        .font(.caption2.weight(.semibold))
-                    Button(action: onDiscard) {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+        NavigationView {
+            SelectableTextView(text: text, fontSize: fontSize,
+                               textColor: UIColor(theme.text),
+                               background: UIColor(theme.background))
+                .ignoresSafeArea(.container, edges: .bottom)
+                .navigationTitle("Select Text")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { dismiss() }
                     }
                 }
-                .foregroundColor(.secondary)
-                Text(text)
-                    .font(.system(size: 17 * CGFloat(textScale)))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(Color(.secondarySystemBackground))
-                    .foregroundColor(.primary)
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            }
         }
+        .navigationViewStyle(.stack)
+        .preferredColorScheme(theme.scheme)
     }
 }
 
-/// A queued user prompt held server-side (never vanished, never duplicated).
-struct QueuedBubble: View {
-    let item: QueueItem
-    var onCancel: () -> Void = {}
-    @Environment(\.chatTextScale) private var textScale
+struct SelectableTextView: UIViewRepresentable {
+    let text: String
+    let fontSize: CGFloat
+    let textColor: UIColor
+    let background: UIColor
 
-    var body: some View {
-        HStack {
-            Spacer(minLength: 60)
-            VStack(alignment: .trailing, spacing: 4) {
-                HStack(spacing: 5) {
-                    Image(systemName: "clock.arrow.circlepath")
-                    Text(statusLabel)
-                        .font(.caption2.weight(.semibold))
-                    Button(action: onCancel) {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .foregroundColor(.orange)
-                Text(item.message)
-                    .font(.system(size: 17 * CGFloat(textScale)))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(Color.orange.opacity(0.25))
-                    .foregroundColor(.primary)
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            }
-        }
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.alwaysBounceVertical = true
+        view.dataDetectorTypes = [.link]
+        view.adjustsFontForContentSizeCategory = true
+        view.textContainerInset = UIEdgeInsets(top: 16, left: 12, bottom: 32, right: 12)
+        return view
     }
 
-    /// Status + wait time: "queued · 2m" — the wait duration tells the user
-    /// how long their prompt has been waiting (server queue depth feedback).
-    private var statusLabel: String {
-        var parts: [String] = []
-        parts.append(item.status == "running" ? "sending" : "queued")
-        if let at = item.queuedAt {
-            let elapsed = Int(Date().timeIntervalSince1970 * 1000 - TimeInterval(at)) / 1000
-            if elapsed >= 60 {
-                parts.append(elapsed >= 3600 ? "\(elapsed / 3600)h" : "\(elapsed / 60)m")
-            }
+    func updateUIView(_ view: UITextView, context: Context) {
+        if view.text != text { view.text = text }
+        view.font = UIFontMetrics(forTextStyle: .body).scaledFont(for: .systemFont(ofSize: fontSize))
+        view.textColor = textColor
+        view.backgroundColor = background
+    }
+}
+
+// MARK: - Dynamic Type bridge
+
+extension DynamicTypeSize {
+    /// SwiftUI → UIKit content size category (iOS 15-safe manual mapping).
+    var uiContentSizeCategory: UIContentSizeCategory {
+        switch self {
+        case .xSmall: return .extraSmall
+        case .small: return .small
+        case .medium: return .medium
+        case .large: return .large
+        case .xLarge: return .extraLarge
+        case .xxLarge: return .extraExtraLarge
+        case .xxxLarge: return .extraExtraExtraLarge
+        case .accessibility1: return .accessibilityMedium
+        case .accessibility2: return .accessibilityLarge
+        case .accessibility3: return .accessibilityExtraLarge
+        case .accessibility4: return .accessibilityExtraExtraLarge
+        case .accessibility5: return .accessibilityExtraExtraExtraLarge
+        @unknown default: return .large
         }
-        return parts.joined(separator: " · ")
     }
 }

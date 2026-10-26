@@ -7,6 +7,36 @@ struct SSEFrame {
     var id: String?
 }
 
+/// A frame whose JSON payload was decoded on the EventSource reader task
+/// (never on the main thread). Ids are opaque strings (contract v2 §1).
+struct ParsedSSEFrame {
+    let event: String
+    let id: String?
+    let payload: [String: Any]?
+
+    init(event: String, id: String?, payload: [String: Any]?) {
+        self.event = event
+        self.id = id
+        self.payload = payload
+    }
+
+    init(_ frame: SSEFrame) {
+        self.event = frame.event
+        self.id = frame.id
+        self.payload = frame.data.data(using: .utf8)
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+    }
+
+    /// Event name, falling back to the payload `type` for unnamed frames.
+    var type: String {
+        if event != "message" { return event }
+        return (payload?["type"] as? String) ?? event
+    }
+
+    /// Contract v2 §1: server could not replay from our Last-Event-ID.
+    var isReset: Bool { type == "reset" || (payload?["type"] as? String) == "reset" }
+}
+
 private enum SSEParserError: LocalizedError {
     case frameTooLarge
 
@@ -95,9 +125,10 @@ final class EventSource {
         case disconnected, connecting, connected
     }
 
-    var onFrame: ((SSEFrame) -> Void)?
-    var onStateChange: ((State) -> Void)?
-    var onError: ((String) -> Void)?
+    /// Parsed frames, delivered on the main actor in arrival-order batches.
+    var onFrames: (@MainActor ([ParsedSSEFrame]) -> Void)?
+    var onStateChange: (@MainActor (State) -> Void)?
+    var onError: (@MainActor (String) -> Void)?
 
     private let url: URL
     private let token: String
@@ -108,6 +139,9 @@ final class EventSource {
     private var generation = 0
     private var lastEventId: String?
     private var retryDelay: TimeInterval = 1
+    /// Frames parsed off-main waiting for the next main-actor drain.
+    private var pendingFrames: [(generation: Int, frame: ParsedSSEFrame)] = []
+    private var drainScheduled = false
 
     init(url: URL, token: String) {
         self.url = url
@@ -130,7 +164,9 @@ final class EventSource {
         generation += 1
         let currentGeneration = generation
         lock.unlock()
-        runTask = Task { [weak self] in
+        // Detached: the reader loop and JSON parsing must never inherit the
+        // caller's main-actor context.
+        runTask = Task.detached(priority: .userInitiated) { [weak self] in
             await self?.run(generation: currentGeneration)
         }
     }
@@ -144,6 +180,18 @@ final class EventSource {
         lock.unlock()
         task?.cancel()
         emitState(.disconnected, generation: nil)
+    }
+
+    /// Network came back (NWPathMonitor): skip the remaining backoff and
+    /// reconnect now, resuming from the same Last-Event-ID cursor.
+    func reconnectNow() {
+        lock.lock()
+        let running = !closed
+        lock.unlock()
+        guard running else { return }
+        setRetryDelay(1)
+        stop()
+        start()
     }
 
     private func isCurrent(_ generation: Int) -> Bool {
@@ -202,7 +250,7 @@ final class EventSource {
                     }
                     if let frame {
                         updateCursor(parser.cursor)
-                        emitFrame(frame, generation: generation)
+                        emitFrame(ParsedSSEFrame(frame), generation: generation)
                     }
                 }
                 parser.finish()
@@ -227,10 +275,14 @@ final class EventSource {
             }
         }
 
+        finishRun(generation: generation)
+        emitState(.disconnected, generation: generation)
+    }
+
+    private func finishRun(generation: Int) {
         lock.lock()
         if self.generation == generation { runTask = nil }
         lock.unlock()
-        emitState(.disconnected, generation: generation)
     }
 
     private func setRetryDelay(_ value: TimeInterval) {
@@ -252,12 +304,37 @@ final class EventSource {
         }
     }
 
-    private func emitFrame(_ frame: SSEFrame, generation: Int) {
-        guard isCurrent(generation) else { return }
+    /// Buffer a parsed frame and schedule ONE main-actor drain for the whole
+    /// burst (replays and coalesced deltas arrive in clumps).
+    private func emitFrame(_ frame: ParsedSSEFrame, generation: Int) {
+        lock.lock()
+        guard !closed, self.generation == generation else { lock.unlock(); return }
+        pendingFrames.append((generation, frame))
+        let schedule = !drainScheduled
+        drainScheduled = true
+        lock.unlock()
+        guard schedule else { return }
         Task { @MainActor [weak self] in
-            guard let self, self.isCurrent(generation) else { return }
-            self.onFrame?(frame)
+            self?.drainFrames()
         }
+    }
+
+    @MainActor
+    private func drainFrames() {
+        let frames = takePendingFrames()
+        guard !frames.isEmpty else { return }
+        onFrames?(frames)
+    }
+
+    private func takePendingFrames() -> [ParsedSSEFrame] {
+        lock.lock()
+        defer { lock.unlock() }
+        let batch = pendingFrames
+        pendingFrames = []
+        drainScheduled = false
+        guard !closed else { return [] }
+        let current = generation
+        return batch.filter { $0.generation == current }.map(\.frame)
     }
 
     private func emitError(_ message: String, generation: Int) {
