@@ -127,20 +127,7 @@ struct SessionListView: View {
                             .foregroundColor(.secondary)
                         }
                         Spacer()
-                        if let activity = session.currentActivity {
-                            // Contract §7: what the agent is doing (no elapsed).
-                            HStack(spacing: 4) {
-                                Image(systemName: activity.symbolName)
-                                    .accessibilityHidden(true)
-                                Text(activity.label)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                            .font(.caption2.weight(.semibold))
-                            .foregroundColor(activity.kind == .question ? .orange : theme.accent)
-                            .frame(maxWidth: 150, alignment: .trailing)
-                            .accessibilityElement(children: .combine)
-                        } else if session.busy {
+                        if session.busy {
                             ProgressView().controlSize(.small)
                         }
                     }
