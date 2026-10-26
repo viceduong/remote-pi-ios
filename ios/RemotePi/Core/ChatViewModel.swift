@@ -921,14 +921,7 @@ final class ChatViewModel: ObservableObject {
             defer { self.modelsLoadInFlight = false }
             do {
                 let listing = try await self.client.listModels(self.sessionId)
-                self.modelList = .loaded(listing.models)
-                // A listing fetched mid-switch must not undo the optimistic pick.
-                if let current = listing.current, self.modelSwitchInFlight == 0 {
-                    self.applyCurrentModel(current)
-                } else if let current = self.currentModel, current.name == nil,
-                          let entry = listing.models.first(where: current.matches) {
-                    self.currentModel = entry.ref
-                }
+                self.adoptListing(listing)
             } catch {
                 if APIClient.isCancellation(error) {
                     if !hadList { self.modelList = .idle }
@@ -972,6 +965,18 @@ final class ChatViewModel: ObservableObject {
 
     /// Adopt a server-reported model, filling the display name from the
     /// listing when the report carries none. Equality-gated.
+    /// Install a fetched listing. A listing fetched mid-switch must not undo
+    /// the optimistic pick; otherwise it names a summary-seeded current model.
+    private func adoptListing(_ listing: ModelListing) {
+        modelList = .loaded(listing.models)
+        if let current = listing.current, modelSwitchInFlight == 0 {
+            applyCurrentModel(current)
+        } else if let current = currentModel, current.name == nil,
+                  let entry = listing.models.first(where: current.matches) {
+            currentModel = entry.ref
+        }
+    }
+
     private func applyCurrentModel(_ ref: ModelRef) {
         var resolved = ref
         if resolved.name == nil, let entry = availableModels.first(where: ref.matches) {
@@ -1225,8 +1230,7 @@ final class ChatViewModel: ObservableObject {
 
     /// Test seam: install a model listing as if `GET /models` returned it.
     func seedModelsForTesting(_ listing: ModelListing) {
-        modelList = .loaded(listing.models)
-        if let current = listing.current { applyCurrentModel(current) }
+        adoptListing(listing)
     }
     #endif
 
