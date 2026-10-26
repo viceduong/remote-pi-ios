@@ -112,9 +112,18 @@ final class QuestionSnapshotTests: XCTestCase {
     }
 
     private func snapshot(controller: UIViewController, size: CGSize, name: String, settle: TimeInterval) {
-        let window = UIWindow(frame: CGRect(origin: .zero, size: size))
+        // A window must belong to the host app's scene to render (iOS 13+);
+        // a scene-less window draws blank.
+        let window: UIWindow
+        if let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first {
+            window = UIWindow(windowScene: scene)
+        } else {
+            window = UIWindow()
+        }
+        window.frame = CGRect(origin: .zero, size: size)
         window.rootViewController = controller
-        window.isHidden = false
+        window.windowLevel = .alert + 1
+        window.makeKeyAndVisible()
         controller.view.frame = window.bounds
         controller.view.layoutIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(settle))
