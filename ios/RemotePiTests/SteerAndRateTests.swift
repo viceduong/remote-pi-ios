@@ -108,3 +108,121 @@ final class SteerAndRateTests: XCTestCase {
                        "steering keeps the same transcript row — the chip never duplicates")
     }
 }
+
+/// Live-object behaviour of the inherited tok/s + send-now work: when the
+/// rate is shown, and how a steered chip renders (MainActor types).
+@MainActor
+final class LiveRateAndSteerStateTests: XCTestCase {
+
+    private func usage(_ output: Int) -> SessionUsage {
+        SessionUsage(json: ["input": 1_000, "output": output])!
+    }
+
+    private func busy(_ kind: AgentActivity.Kind, tool: String? = nil) -> AgentStatusState.Event {
+        .status(busy: true, owner: "bridge", v2: true, isSnapshot: false,
+                activity: AgentActivity(kind: kind, tool: tool), hasActivity: true)
+    }
+
+    func testRateShownOnlyWhileModelStreamsOutput() {
+        let status = ChatLiveStatus()
+        let t0 = Date()
+        // Optimistic "Waiting…" (no confirmed turn): usage never shows a rate.
+        status.apply(.optimisticSend)
+        status.setUsage(usage(0), at: t0)
+        status.setUsage(usage(40), at: t0.addingTimeInterval(1))
+        XCTAssertNil(status.tokensPerSecond)
+
+        status.apply(busy(.writing))
+        XCTAssertTrue(status.isStreamingOutput)
+        status.setUsage(usage(100), at: t0.addingTimeInterval(2))
+        status.setUsage(usage(160), at: t0.addingTimeInterval(3))
+        XCTAssertEqual(status.tokensPerSecond, 60)
+
+        // thinking ↔ writing keeps the meter (still streaming output).
+        status.apply(busy(.thinking))
+        XCTAssertEqual(status.tokensPerSecond, 60)
+
+        // A tool run hides the readout immediately and ignores usage frames.
+        status.apply(busy(.tool, tool: "bash"))
+        XCTAssertFalse(status.isStreamingOutput)
+        XCTAssertNil(status.tokensPerSecond)
+        status.setUsage(usage(170), at: t0.addingTimeInterval(30))
+        XCTAssertNil(status.tokensPerSecond)
+
+        // Next message: fresh baseline — no sample spanning the tool run.
+        status.apply(busy(.writing))
+        status.setUsage(usage(5), at: t0.addingTimeInterval(31))
+        XCTAssertNil(status.tokensPerSecond, "first frame after a gap is only a baseline")
+        status.setUsage(usage(35), at: t0.addingTimeInterval(32))
+        XCTAssertEqual(status.tokensPerSecond, 30)
+
+        // Idle clears it and a final idle usage frame doesn't revive it.
+        status.apply(.status(busy: false, owner: "bridge", v2: true, isSnapshot: false,
+                             activity: nil, hasActivity: true))
+        XCTAssertNil(status.tokensPerSecond)
+        status.setUsage(usage(400), at: t0.addingTimeInterval(33))
+        XCTAssertNil(status.tokensPerSecond)
+    }
+
+    func testRateIsSmoothedNotJumpy() {
+        let status = ChatLiveStatus()
+        let t0 = Date()
+        status.apply(busy(.writing))
+        status.setUsage(usage(0), at: t0)
+        status.setUsage(usage(50), at: t0.addingTimeInterval(1))     // 50 tok/s seeds
+        status.setUsage(usage(250), at: t0.addingTimeInterval(2))    // burst: 200 instant
+        let shown = status.tokensPerSecond ?? 0
+        XCTAssertGreaterThan(shown, 50)
+        XCTAssertLessThan(shown, 120, "a single burst moves the readout only part of the way")
+    }
+
+    private func queueFrame(status: String) -> ParsedSSEFrame {
+        let json = #"{"type":"queue_update","items":[{"id":"srv-1","clientMessageId":"c1","message":"Also add tests","status":"\#(status)","queuedAt":1793033681031}]}"#
+        let payload = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+        return ParsedSSEFrame(event: "queue_update", id: nil, payload: payload)
+    }
+
+    func testSteeredChipKeepsRowAndIgnoresLaggingQueuedStatus() throws {
+        let vm = ChatViewModel(client: APIClient(baseURL: URL(string: "http://127.0.0.1:9")!, token: "t"),
+                               sessionId: "steer-tests")
+        vm.ingestForTesting([queueFrame(status: "queued")])
+        vm.commitNow()
+        let before = try XCTUnwrap(vm.transcript.value.first { $0.kind == .queued })
+        XCTAssertTrue(before.canSteer)
+        XCTAssertTrue(before.cancellable)
+        XCTAssertEqual(before.actionId, "srv-1")
+
+        vm.steerQueued("srv-1")
+        vm.commitNow()
+        let after = try XCTUnwrap(vm.transcript.value.first { $0.kind == .queued })
+        XCTAssertEqual(after.id, before.id, "same row — no duplicate, no recreation")
+        XCTAssertEqual(vm.transcript.value.filter { $0.kind == .queued }.count, 1)
+        XCTAssertFalse(after.canSteer, "no second send-now while one is in flight")
+        XCTAssertEqual(after.statusText, "sending")
+
+        // A lagging queue_update still saying `queued` must not flip it back.
+        vm.ingestForTesting([queueFrame(status: "queued")])
+        vm.commitNow()
+        let lagged = try XCTUnwrap(vm.transcript.value.first { $0.kind == .queued })
+        XCTAssertEqual(lagged.statusText, "sending")
+        XCTAssertFalse(lagged.canSteer)
+        vm.stop()
+    }
+
+    func testPiNativeSteerEchoDoesNotDuplicateDeliveredChip() {
+        // Server item (running, steered) already echoed as a user row, while
+        // pi's own steering queue still lists the text: no chip at all.
+        let server = QueueItem(id: "srv-1", clientMessageId: "c1", message: "Also add tests",
+                               status: "running", queuedAt: 1_000)
+        let echo = ChatMessage(entryId: "e1", clientMessageId: "c1", role: .user, text: "Also add tests",
+                               thinking: nil, toolCalls: [], isError: false, toolName: nil,
+                               isSystemNote: false, model: nil, errorMessage: nil, timestamp: 2_000)
+        let result = QueueReconciler.reconcile(localPending: [], server: [server],
+                                               piNative: ["Also add tests"], messages: [echo])
+        XCTAssertTrue(result.chips.isEmpty)
+        // An unrelated pi-native text is still shown.
+        let other = QueueReconciler.reconcile(localPending: [], server: [server],
+                                              piNative: ["something else"], messages: [echo])
+        XCTAssertEqual(other.chips.map(\.origin), [.piNative])
+    }
+}

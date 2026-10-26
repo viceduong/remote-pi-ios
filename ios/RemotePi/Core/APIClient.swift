@@ -229,24 +229,39 @@ struct APIClient {
                               body: TurnRequest(message: message, clientMessageId: clientMessageId))
     }
 
-    struct ModelInfo: Decodable, Identifiable {
-        let id: String
-        let name: String?
-        let provider: String?
+    /// Contract §11: `GET /api/sessions/:id/models` → `{models, current}`.
+    /// Decoding is tolerant (see `ModelListing`): older servers' nested
+    /// `{models:{models:[…]}}` shape and malformed entries never fail it.
+    func listModels(_ id: String) async throws -> ModelListing {
+        try await get("/api/sessions/\(id)/models")
     }
 
-    func listModels(_ id: String) async throws -> [ModelInfo] {
-        struct Wrapper: Decodable {
-            struct Inner: Decodable { let models: [ModelInfo] }
-            let models: Inner
+    /// Contract §11: `POST /api/sessions/:id/models {provider, modelId}` →
+    /// `{ok, model}`. Returns the model the server reports as applied, or
+    /// nil when an older server answers only `{ok:true}`. Throws
+    /// `APIError.http` on 404 (unknown model) / 502 (transport failure).
+    func setModel(_ id: String, provider: String, modelId: String) async throws -> ModelRef? {
+        struct Req: Encodable {
+            let provider: String?
+            let modelId: String
         }
-        let wrapper: Wrapper = try await get("/api/sessions/\(id)/models")
-        return wrapper.models.models
+        let data = try await send(makeRequest("/api/sessions/\(id)/models", method: "POST",
+                                              body: Req(provider: provider.isEmpty ? nil : provider,
+                                                        modelId: modelId)))
+        return try Self.decodeSetModelResponse(data)
     }
 
-    func setModel(_ id: String, modelId: String) async throws {
-        struct Req: Encodable { let modelId: String }
-        try await postNoResponse("/api/sessions/\(id)/models", body: Req(modelId: modelId))
+    /// Body of a 2xx `POST /models`: `{ok:true, model:{provider,id,name}}`.
+    /// An empty / non-JSON body or a missing/malformed `model` is still a
+    /// success (legacy servers answer `{ok:true}`) → nil; `ok:false` throws.
+    static func decodeSetModelResponse(_ data: Data) throws -> ModelRef? {
+        struct Resp: Decodable {
+            let ok: Bool?
+            let model: Lenient<ModelEntry>?
+        }
+        guard !data.isEmpty, let resp = try? JSONDecoder().decode(Resp.self, from: data) else { return nil }
+        if resp.ok == false { throw APIError.http(500, "Model switch was rejected", nil) }
+        return resp.model?.value?.ref
     }
 
     func cycleModel(_ id: String) async throws {

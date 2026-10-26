@@ -21,7 +21,9 @@ struct TokenRateMeter {
     private var lastTime: Date?
     private var ema: Double?
 
-    init(alpha: Double = 0.4, minInterval: TimeInterval = 0.2) {
+    /// Defaults favour a calm readout: samples span ≥0.4s (providers flush
+    /// usage in bursts) and each moves the average only 30% of the way.
+    init(alpha: Double = 0.3, minInterval: TimeInterval = 0.4) {
         self.alpha = alpha
         self.minInterval = minInterval
     }
@@ -82,7 +84,7 @@ final class ChatLiveStatus: ObservableObject {
     /// Changes only on kind/tool transitions — not every second.
     @Published private(set) var activitySince: Date?
     /// Live output throughput (whole tokens/sec), shown in the stats strip
-    /// only while streaming and nonzero. Updated from usage frames, not from
+    /// only while the model streams output (`isStreamingOutput`) and nonzero. Updated from usage frames, not from
     /// SwiftUI re-renders, and equality-gated on the displayed integer so the
     /// strip re-renders only when the number actually changes.
     @Published private(set) var tokensPerSecond: Int?
@@ -98,15 +100,34 @@ final class ChatLiveStatus: ObservableObject {
 
     func apply(_ event: AgentStatusState.Event) {
         let wasBusy = state.isBusy
+        let wasStreaming = isStreamingOutput
         state.apply(event)
-        // The t/s meter is per-turn: reset on every busy edge (new turn
-        // starting OR the turn ending) and clear the readout.
-        if wasBusy != state.isBusy {
+        // The t/s meter covers one continuous stretch of model output: reset
+        // it (and clear the readout) on every busy edge AND whenever output
+        // streaming starts/stops (e.g. a tool run between two assistant
+        // messages) — otherwise the readout would linger, stale, through a
+        // long tool call and the first sample after it would divide by the
+        // whole tool duration.
+        if wasBusy != state.isBusy || wasStreaming != isStreamingOutput {
             rateMeter.reset()
             setTokensPerSecond(nil)
         }
         publish()
         if wasBusy && !state.isBusy { onBecameIdle?() }
+    }
+
+    /// The model is producing tokens right now (thinking, writing text or
+    /// streaming tool-call arguments) — the only time tok/s is meaningful.
+    /// A confirmed busy turn is required: the optimistic "Waiting…" state
+    /// never shows a rate.
+    var isStreamingOutput: Bool {
+        guard state.busy else { return false }
+        switch state.displayActivity?.kind {
+        case .thinking?, .writing?, .toolcall?:
+            return true
+        case .waiting?, .tool?, .compacting?, .retrying?, .question?, nil:
+            return false
+        }
     }
 
     /// Clear an optimistic "Waiting…" nobody confirmed. Returns true if it fired.
@@ -119,13 +140,15 @@ final class ChatLiveStatus: ObservableObject {
         return true
     }
 
-    func setUsage(_ usage: SessionUsage) {
+    /// `now` is injectable for tests; production callers use the default.
+    func setUsage(_ usage: SessionUsage, at now: Date = Date()) {
         liveUsage = usage
         if !hasUsage { hasUsage = true }
-        // Only track throughput while a turn is in flight; an idle usage frame
-        // (e.g. the final total) must not revive the readout.
-        guard state.isBusy else { return }
-        if let rate = rateMeter.record(outputTokens: usage.output, at: Date()) {
+        // Only track throughput while output is streaming; an idle usage
+        // frame (e.g. the final total) or one during a tool run must not
+        // revive the readout.
+        guard isStreamingOutput else { return }
+        if let rate = rateMeter.record(outputTokens: usage.output, at: now) {
             setTokensPerSecond(Int(rate.rounded()))
         }
     }

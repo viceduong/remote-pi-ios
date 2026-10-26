@@ -307,9 +307,10 @@ struct QueueItem: Decodable, Identifiable, Equatable {
                   clientMessageId: d["clientMessageId"] as? String,
                   message: message,
                   status: d["status"] as? String ?? "queued",
-                  queuedAt: (d["queuedAt"] as? NSNumber)?.intValue,
-                  startedAt: (d["startedAt"] as? NSNumber)?.intValue,
-                  completedAt: (d["completedAt"] as? NSNumber)?.intValue,
+                  // ms epochs: int64Value is lossless (see AgentActivity.init(json:)).
+                  queuedAt: (d["queuedAt"] as? NSNumber).map { Int($0.int64Value) },
+                  startedAt: (d["startedAt"] as? NSNumber).map { Int($0.int64Value) },
+                  completedAt: (d["completedAt"] as? NSNumber).map { Int($0.int64Value) },
                   error: d["error"] as? String)
     }
 }

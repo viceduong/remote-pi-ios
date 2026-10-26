@@ -49,7 +49,16 @@ final class AttributedTextView: UIView {
 /// Small controls get a 44pt minimum hit target (HIG) without changing
 /// their visual size.
 final class HitExpandedButton: UIButton {
+    /// Explicit hit outsets (positive = larger). nil = expand symmetrically
+    /// to 44×44. Used when two small buttons sit side by side so their
+    /// expanded areas never overlap (the one on top would steal taps).
+    var hitOutsets: UIEdgeInsets?
+
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        if let o = hitOutsets {
+            return bounds.inset(by: UIEdgeInsets(top: -o.top, left: -o.left,
+                                                 bottom: -o.bottom, right: -o.right)).contains(point)
+        }
         let dx = max(0, (44 - bounds.width) / 2)
         let dy = max(0, (44 - bounds.height) / 2)
         return bounds.insetBy(dx: -dx, dy: -dy).contains(point)
@@ -278,6 +287,14 @@ final class TranscriptCell: UITableViewCell {
                                            width: m.headerButton, height: m.headerButton)
                 rightEdge = steerButton.frame.minX - 5
             }
+            // Side by side, the 44pt targets would overlap by ~17pt and the
+            // send-now button (above ✕ in z-order) would capture taps on the
+            // left part of ✕ — interrupting the agent instead of cancelling.
+            // Split the 5pt gap between them instead.
+            let pair = !actionButton.isHidden && !steerButton.isHidden
+            let v = max(0, (44 - m.headerButton) / 2)
+            actionButton.hitOutsets = pair ? UIEdgeInsets(top: v, left: 2.5, bottom: v, right: v) : nil
+            steerButton.hitOutsets = pair ? UIEdgeInsets(top: v, left: v, bottom: v, right: 2.5) : nil
             let labelX = headerIcon.frame.maxX + 5
             headerLabel.frame = CGRect(x: labelX, y: h.minY,
                                        width: max(0, rightEdge - labelX), height: h.height)

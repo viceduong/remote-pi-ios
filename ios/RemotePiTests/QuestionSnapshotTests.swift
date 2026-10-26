@@ -106,41 +106,5 @@ final class QuestionSnapshotTests: XCTestCase {
         .preferredColorScheme(theme.name == AppTheme.light.name ? .light : .dark)
     }
 
-    private func snapshot<V: View>(_ view: V, name: String) {
-        let controller = UIHostingController(rootView: view)
-        snapshot(controller: controller, size: CGSize(width: 390, height: 844), name: name, settle: 0.6)
-    }
-
-    private func snapshot(controller: UIViewController, size: CGSize, name: String, settle: TimeInterval) {
-        // A window must belong to the host app's scene to render (iOS 13+);
-        // a scene-less window draws blank.
-        let window: UIWindow
-        if let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first {
-            window = UIWindow(windowScene: scene)
-        } else {
-            window = UIWindow()
-        }
-        window.frame = CGRect(origin: .zero, size: size)
-        window.rootViewController = controller
-        window.windowLevel = .alert + 1
-        window.makeKeyAndVisible()
-        controller.view.frame = window.bounds
-        controller.view.layoutIfNeeded()
-        RunLoop.main.run(until: Date().addingTimeInterval(settle))
-        controller.view.layoutIfNeeded()
-        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
-            window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
-        }
-        let attachment = XCTAttachment(image: image)
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
-        if let data = image.pngData() {
-            let root = ProcessInfo.processInfo.environment["SIMULATOR_HOST_HOME"] ?? NSTemporaryDirectory()
-            let dir = URL(fileURLWithPath: root).appendingPathComponent("remotepi-snapshots")
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            try? data.write(to: dir.appendingPathComponent("\(name).png"))
-        }
-        window.isHidden = true
-    }
+    // `snapshot(...)` helpers live in SnapshotTestSupport.swift (shared).
 }

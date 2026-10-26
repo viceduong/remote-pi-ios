@@ -384,6 +384,7 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
     private func performSteer(id: String) {
         guard let item = items[id], item.kind == .queued, item.canSteer,
               let actionId = item.actionId else { return }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         actions.steerQueued(actionId)
     }
 

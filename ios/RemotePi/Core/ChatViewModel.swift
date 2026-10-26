@@ -52,6 +52,20 @@ final class ChatViewModel: ObservableObject {
     /// Set after a successful fork — ChatView pops back to the session list.
     @Published private(set) var shouldDismiss = false
 
+    /// Contract §11 model picker listing state.
+    enum ModelListState: Equatable {
+        case idle
+        case loading
+        case loaded([ModelEntry])
+        case failed(String)
+    }
+
+    /// The session's current model: seeded from the summary `model` string,
+    /// updated by `model_changed` frames, `GET /models` `current` and
+    /// successful (optimistically applied) switches.
+    @Published private(set) var currentModel: ModelRef?
+    @Published private(set) var modelList: ModelListState = .idle
+
     // MARK: Outputs for focused observers
 
     let status = ChatLiveStatus()
@@ -111,6 +125,21 @@ final class ChatViewModel: ObservableObject {
     private var resolvedQuestionIds = Set<String>()
     /// Questionnaire whose answer POST is in flight (card already removed).
     private var answeringQuestionId: String?
+    /// Send-now (§10) per server queue id: `.distantFuture` while the POST is
+    /// in flight, then the acceptance time. While present the item renders
+    /// as running ("sending", no buttons) even if a lagging `queue_update`
+    /// still reports it `queued` — no flash back, no double steer.
+    private var steering: [String: Date] = [:]
+    /// How long an accepted steer keeps overriding a stale `queued` status.
+    private static let steerGrace: TimeInterval = 30
+    /// Model picker bookkeeping: a newer switch supersedes an older one; a
+    /// `model_changed` frame received after a switch began wins over its
+    /// revert-on-failure.
+    private var modelSwitchSeq = 0
+    private var modelFrameSeq = 0
+    /// Number of switches whose POST is still in flight.
+    private var modelSwitchInFlight = 0
+    private var modelsLoadInFlight = false
 
     // MARK: Owned tasks (all cancelled in `stop()`)
 
@@ -128,10 +157,11 @@ final class ChatViewModel: ObservableObject {
     private var lastCacheSignature: Int?
     private var pendingCacheSignature: Int?
 
-    init(client: APIClient, sessionId: String) {
+    init(client: APIClient, sessionId: String, initialModel: String? = nil) {
         self.client = client
         self.sessionId = sessionId
         self.offlineStore = OfflineQueueStore(sessionId: sessionId)
+        self.currentModel = ModelRef(summary: initialModel)
     }
 
     // MARK: - Lifecycle
@@ -297,7 +327,9 @@ final class ChatViewModel: ObservableObject {
         visibleMessages = messages.filter(ChatMessage.isVisibleInFocus)
 
         expireStaleLocalPending()
-        let reconciled = QueueReconciler.reconcile(localPending: localPending, server: serverQueue,
+        pruneSteering()
+        let reconciled = QueueReconciler.reconcile(localPending: steered(localPending),
+                                                   server: steered(serverQueue),
                                                    piNative: piQueue, messages: messages)
         if !reconciled.deliveredLocal.isEmpty,
            localPending.contains(where: { reconciled.deliveredLocal.contains($0.clientMessageId ?? "") }) {
@@ -777,44 +809,70 @@ final class ChatViewModel: ObservableObject {
     }
 
     /// Contract §10 "send now": promote a queued item into the running turn.
-    /// Optimistic — flip the chip to a running/"sending" state at once (same
-    /// stable row id, so it never duplicates); the user-row echo reconciles it
-    /// away exactly like a normal dispatch. On failure restore the queued chip
-    /// and surface the error.
+    /// Optimistic — the chip flips to running/"sending" at once via the
+    /// `steering` overlay (same stable row id, so it never duplicates, and a
+    /// lagging `queue_update` cannot flip it back); the user-row echo
+    /// reconciles it away exactly like a normal dispatch. A second tap (or
+    /// a tap on a chip that is no longer queued) is ignored, so a duplicate
+    /// POST can never 404 and "restore" a chip whose steer is succeeding.
+    /// On failure the overlay is dropped (chip back to queued + send-now)
+    /// and the error surfaced.
     func steerQueued(_ serverItemId: String) {
-        func markRunning(_ item: QueueItem) -> QueueItem {
-            QueueItem(id: item.id, clientMessageId: item.clientMessageId, message: item.message,
-                      status: "running", queuedAt: item.queuedAt)
-        }
-        if let i = serverQueue.firstIndex(where: { $0.id == serverItemId }) {
-            serverQueue[i] = markRunning(serverQueue[i])
-        }
-        if let i = localPending.firstIndex(where: { $0.id == serverItemId }) {
-            localPending[i] = markRunning(localPending[i])
-        }
+        guard steering[serverItemId] == nil else { return }
+        let isQueued = serverQueue.contains { $0.id == serverItemId && $0.status == "queued" }
+            || localPending.contains { $0.id == serverItemId && $0.status == "queued" }
+        guard isQueued else { return }
+        steering[serverItemId] = .distantFuture
+        scheduleCommit()
         status.apply(.optimisticSend)
         scrollToBottomRequests.send(())
         spawn { [weak self] in
             guard let self else { return }
             do {
                 try await self.client.steerQueued(self.sessionId, itemId: serverItemId)
+                if self.steering[serverItemId] != nil {
+                    self.steering[serverItemId] = Date()
+                    self.scheduleCommit()
+                }
                 // On a live stream the echo + queue_update reconcile the chip;
                 // without one, pull server truth now.
-                if self.connectionState != .connected { await self.refreshFromServer() }
+                if self.connectionState != .connected {
+                    await self.refreshFromServer()
+                    await self.loadQueue()
+                }
             } catch {
+                self.steering[serverItemId] = nil
+                self.scheduleCommit()
                 guard !APIClient.isCancellation(error) else { return }
                 // Delivery failed (§10: 404/409/502) — the item stays queued
-                // server-side; restore the queued chip so it can be retried.
+                // server-side (or is gone: 404); re-sync the queue.
                 self.status.apply(.clearOptimistic)
-                if let i = self.localPending.firstIndex(where: { $0.id == serverItemId }) {
-                    let it = self.localPending[i]
-                    self.localPending[i] = QueueItem(id: it.id, clientMessageId: it.clientMessageId,
-                                                     message: it.message, status: "queued",
-                                                     queuedAt: it.queuedAt)
-                }
                 self.surface(error)
                 await self.loadQueue()
             }
+        }
+    }
+
+    /// Items with a send-now in flight / just accepted render as running.
+    private func steered(_ items: [QueueItem]) -> [QueueItem] {
+        guard !steering.isEmpty else { return items }
+        return items.map { item in
+            guard item.status == "queued", steering[item.id] != nil else { return item }
+            return QueueItem(id: item.id, clientMessageId: item.clientMessageId, message: item.message,
+                             status: "running", queuedAt: item.queuedAt)
+        }
+    }
+
+    /// Drop overlay entries whose item is gone, or whose accepted steer is
+    /// older than the grace period (server truth wins again). In-flight
+    /// entries stay until their request resolves.
+    private func pruneSteering() {
+        guard !steering.isEmpty else { return }
+        let now = Date()
+        let known = Set(serverQueue.map(\.id)).union(localPending.map(\.id))
+        steering = steering.filter { entry in
+            if entry.value == .distantFuture { return true }
+            return known.contains(entry.key) && now.timeIntervalSince(entry.value) < Self.steerGrace
         }
     }
 
@@ -840,6 +898,86 @@ final class ChatViewModel: ObservableObject {
         if let stats = try? await client.fetchStats(sessionId) {
             status.setStats(stats)
         }
+    }
+
+    // MARK: - Model picker (contract §11)
+
+    /// Models of the current listing (empty until loaded).
+    var availableModels: [ModelEntry] {
+        if case .loaded(let models) = modelList { return models }
+        return []
+    }
+
+    /// Fetch `GET /models`. A refresh keeps the previous list visible; a
+    /// failure with no list yet shows the error state (retry from the sheet).
+    func loadModels() {
+        guard !modelsLoadInFlight else { return }
+        modelsLoadInFlight = true
+        let hadList: Bool
+        if case .loaded = modelList { hadList = true } else { hadList = false }
+        if !hadList { modelList = .loading }
+        spawn { [weak self] in
+            guard let self else { return }
+            defer { self.modelsLoadInFlight = false }
+            do {
+                let listing = try await self.client.listModels(self.sessionId)
+                self.modelList = .loaded(listing.models)
+                // A listing fetched mid-switch must not undo the optimistic pick.
+                if let current = listing.current, self.modelSwitchInFlight == 0 {
+                    self.applyCurrentModel(current)
+                } else if let current = self.currentModel, current.name == nil,
+                          let entry = listing.models.first(where: current.matches) {
+                    self.currentModel = entry.ref
+                }
+            } catch {
+                if APIClient.isCancellation(error) {
+                    if !hadList { self.modelList = .idle }
+                    return
+                }
+                if !hadList { self.modelList = .failed(error.localizedDescription) }
+            }
+        }
+    }
+
+    /// Switch the session's model (allowed while busy — pi applies it from
+    /// the next turn). Optimistic: `currentModel` moves at once and reverts
+    /// on failure (unless a newer switch or a `model_changed` frame has
+    /// superseded it); the error is surfaced through `errorMessage`.
+    func switchModel(_ entry: ModelEntry) {
+        let target = entry.ref
+        if let current = currentModel, current.id == target.id, current.provider == target.provider {
+            return
+        }
+        let previous = currentModel
+        modelSwitchSeq += 1
+        let seq = modelSwitchSeq
+        let frameSeq = modelFrameSeq
+        currentModel = target
+        modelSwitchInFlight += 1
+        spawn { [weak self] in
+            guard let self else { return }
+            defer { self.modelSwitchInFlight -= 1 }
+            do {
+                let applied = try await self.client.setModel(self.sessionId, provider: entry.provider,
+                                                             modelId: entry.id)
+                guard seq == self.modelSwitchSeq, frameSeq == self.modelFrameSeq else { return }
+                if let applied { self.applyCurrentModel(applied) }
+            } catch {
+                guard seq == self.modelSwitchSeq, frameSeq == self.modelFrameSeq else { return }
+                self.currentModel = previous
+                self.surface(error)
+            }
+        }
+    }
+
+    /// Adopt a server-reported model, filling the display name from the
+    /// listing when the report carries none. Equality-gated.
+    private func applyCurrentModel(_ ref: ModelRef) {
+        var resolved = ref
+        if resolved.name == nil, let entry = availableModels.first(where: ref.matches) {
+            resolved = entry.ref
+        }
+        if currentModel != resolved { currentModel = resolved }
     }
 
     // MARK: - Offline outbox
@@ -1084,6 +1222,12 @@ final class ChatViewModel: ObservableObject {
         lifecycleActive = true
         handle(frames)
     }
+
+    /// Test seam: install a model listing as if `GET /models` returned it.
+    func seedModelsForTesting(_ listing: ModelListing) {
+        modelList = .loaded(listing.models)
+        if let current = listing.current { applyCurrentModel(current) }
+    }
     #endif
 
     private func handle(_ frame: ParsedSSEFrame) {
@@ -1129,6 +1273,14 @@ final class ChatViewModel: ObservableObject {
                 }
                 resolvedQuestionIds.remove(question.requestId)
                 pendingQuestion = question
+            }
+        case "model_changed":
+            // §11: live frame `{provider, id, name}` (a nested `model` object
+            // is tolerated) — switches from this or another client, or from
+            // the host TUI.
+            if let ref = ModelRef(json: obj) ?? ModelRef(json: obj["model"] as? [String: Any]) {
+                modelFrameSeq += 1
+                applyCurrentModel(ref)
             }
         case "agent_question_resolved":
             if let resolvedId = obj["requestId"] as? String {

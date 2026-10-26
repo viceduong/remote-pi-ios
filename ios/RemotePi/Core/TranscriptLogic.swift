@@ -161,10 +161,18 @@ enum QueueReconciler {
         }
 
         // 3. pi-native queue texts (steering/followUp) not already shown.
+        // Also skip texts that belong to a server/local item even when that
+        // item's chip was just dropped as delivered: after a steer (§10) pi's
+        // own `queue_update {steering:[text]}` can lag the user-row echo, and
+        // must not resurrect the message as a second chip.
+        var owned = Set<String>()
+        for item in server where item.isActive { owned.insert(TextNormalizer.normalize(item.message)) }
+        for item in localPending { owned.insert(TextNormalizer.normalize(item.message)) }
         var occurrences: [String: Int] = [:]
         for text in piNative {
             let norm = TextNormalizer.normalize(text)
             guard !norm.isEmpty else { continue }
+            if owned.contains(norm) { continue }
             if chips.contains(where: { TextNormalizer.normalize($0.item.message) == norm }) { continue }
             let n = occurrences[norm, default: 0]
             occurrences[norm] = n + 1
@@ -232,6 +240,11 @@ struct AgentStatusState: Equatable {
     static let optimisticGrace: TimeInterval = 8
     /// A snapshot's server `since` is trusted only when it is this recent.
     static let maxSnapshotAge: TimeInterval = 3600
+    /// `busySince` older than this is treated as implausible (clock skew).
+    static let maxBusyAge: TimeInterval = 24 * 3600
+    /// A `busySince` at most this far in the future (small server-ahead skew)
+    /// is clamped to now instead of being discarded.
+    static let busySinceSkewTolerance: TimeInterval = 2
 
     var isBusy: Bool { busy || optimisticSince != nil }
 
@@ -328,13 +341,31 @@ struct AgentStatusState: Equatable {
         return true
     }
 
-    /// Restart the elapsed clock only when WHAT is happening changes. The
-    /// server's `since` is used only for a transition first seen in a
-    /// reconnect snapshot, and only when plausible (in the past, < 1h).
+    /// Restart the elapsed clock only when WHAT is happening changes.
+    ///
+    /// With a server that stamps `activity.busySince` (CONTRACT §5/§7: the
+    /// start of the current CONTINUOUS busy period, stable across
+    /// sub-activity transitions and reconnect snapshots) the clock is keyed
+    /// on that busy period: thinking → tool → writing keep one running timer
+    /// that starts at `busySince`, and only a new busy period (new
+    /// `busySince`) or going idle resets it. A `busySince` that is in the
+    /// future (server clock ahead) or absurdly old falls back to the local
+    /// time the period was first seen — still stable across sub-activities.
+    /// A pending question keeps its own clock (time waiting for the user).
+    ///
+    /// Without `busySince` (older servers) the clock restarts per kind/tool;
+    /// the server's `since` is then used only for a transition first seen in
+    /// a reconnect snapshot, and only when plausible (in the past, < 1h).
     private mutating func updateActivityClock(now: Date, snapshotSince: Int?) {
         let key: String?
+        var busyPeriodStart: Int?
         if let activity = displayActivity {
-            key = activity.phaseKey
+            if activity.kind != .question, let busySince = activity.busySince, busySince > 0 {
+                key = "busy|\(busySince)"
+                busyPeriodStart = busySince
+            } else {
+                key = activity.phaseKey
+            }
         } else if !crashed, optimisticSince != nil {
             key = "optimistic"
         } else {
@@ -348,6 +379,16 @@ struct AgentStatusState: Equatable {
         }
         if key == "optimistic", let since = optimisticSince {
             activitySince = since
+            return
+        }
+        if let ms = busyPeriodStart {
+            let start = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+            let age = now.timeIntervalSince(start)
+            if age >= -Self.busySinceSkewTolerance, age < Self.maxBusyAge {
+                activitySince = min(start, now)
+            } else {
+                activitySince = now
+            }
             return
         }
         if let ms = snapshotSince {

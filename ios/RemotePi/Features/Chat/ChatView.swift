@@ -29,7 +29,8 @@ struct ChatView: View {
         let client = APIClient(baseURL: server.url ?? URL(string: "http://localhost")!,
                                token: server.token)
         self.client = client
-        _viewModel = StateObject(wrappedValue: ChatViewModel(client: client, sessionId: session.id))
+        _viewModel = StateObject(wrappedValue: ChatViewModel(client: client, sessionId: session.id,
+                                                             initialModel: session.model))
     }
 
     var body: some View {
@@ -191,39 +192,94 @@ struct ChatBottomBar: View {
                 .background(Color.orange.opacity(0.15))
                 .accessibilityElement(children: .combine)
             }
-            // pi 0.85 stats strip: context % + tokens + cost. Only rendered
-            // when data exists — zero chrome otherwise.
-            if status.stats != nil || status.hasUsage {
-                HStack(spacing: 10) {
-                    if let pct = status.stats?.contextPercent {
-                        Label("\(Int(pct))%", systemImage: "gauge.medium")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundColor(pct > 90 ? .red : pct > 70 ? .orange : theme.secondaryText)
-                            .accessibilityLabel("Context \(Int(pct)) percent used")
-                    }
-                    if let tokens = status.stats?.totalTokens, tokens > 0 {
-                        Text("\(tokens.formatted()) tok")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundColor(theme.secondaryText)
-                    }
-                    if let cost = status.stats?.cost, cost > 0 {
-                        Text(String(format: "$%.2f", cost))
-                            .font(.caption2.monospacedDigit())
-                            .foregroundColor(theme.secondaryText)
-                    }
-                    if let tps = status.tokensPerSecond, tps > 0 {
-                        Text("\(tps) tok/s")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundColor(theme.secondaryText)
-                            .accessibilityLabel("\(tps) tokens per second")
-                    }
-                    Spacer()
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 3)
-            }
+            ChatStatsStrip(viewModel: viewModel, status: status)
             ComposerView { text in viewModel.send(text) }
         }
+    }
+}
+
+/// Session strip: the current model as a tappable chip (contract §11; always
+/// shown so the picker is reachable before any stats exist) + pi 0.85 stats
+/// (context %, tokens, cost) + live tok/s while the model streams output.
+struct ChatStatsStrip: View {
+    @ObservedObject var viewModel: ChatViewModel
+    @ObservedObject var status: ChatLiveStatus
+    @Environment(\.theme) private var theme
+    @State private var showModelPicker = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ModelChip(name: ModelPicker.displayName(current: viewModel.currentModel,
+                                                    models: viewModel.availableModels)) {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                showModelPicker = true
+            }
+            if let pct = status.stats?.contextPercent {
+                Label("\(Int(pct))%", systemImage: "gauge.medium")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundColor(pct > 90 ? .red : pct > 70 ? .orange : theme.secondaryText)
+                    .fixedSize()
+                    .accessibilityLabel("Context \(Int(pct)) percent used")
+            }
+            if let tokens = status.stats?.totalTokens, tokens > 0 {
+                Text("\(tokens.formatted()) tok")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundColor(theme.secondaryText)
+                    .fixedSize()
+                    .accessibilityLabel("\(tokens.formatted()) tokens used")
+            }
+            if let cost = status.stats?.cost, cost > 0 {
+                Text(String(format: "$%.2f", cost))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundColor(theme.secondaryText)
+                    .fixedSize()
+                    .accessibilityLabel(String(format: "Cost %.2f dollars", cost))
+            }
+            if let tps = status.tokensPerSecond, tps > 0 {
+                Text("\(tps) tok/s")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundColor(theme.secondaryText)
+                    .fixedSize()
+                    .accessibilityLabel("\(tps) tokens per second")
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 3)
+        .sheet(isPresented: $showModelPicker) {
+            ModelPickerSheet(viewModel: viewModel, status: viewModel.status, theme: theme)
+        }
+    }
+}
+
+/// Compact capsule naming the current model; truncates before the stats do.
+struct ModelChip: View {
+    let name: String?
+    let action: () -> Void
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: "cpu")
+                    .font(.caption2.weight(.semibold))
+                Text(name ?? "Model")
+                    .font(.caption2.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+            }
+            .foregroundColor(theme.accent)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(theme.accent.opacity(0.12))
+            .clipShape(Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(name.map { "Model: \($0)" } ?? "Choose model")
+        .accessibilityHint("Opens the model picker")
     }
 }
 
@@ -597,7 +653,7 @@ struct QuestionPreviewBlock: View {
     private var naturalHeight: CGFloat {
         let size = UIFont.preferredFont(forTextStyle: .caption2).pointSize
         let lineHeight = ceil(UIFont.monospacedSystemFont(ofSize: size, weight: .regular).lineHeight) + 1
-        let lines = text.reduce(into: 1) { count, ch in if ch == "\n" { count += 1 } }
+        let lines = Self.displayText(text).reduce(into: 1) { count, ch in if ch == "\n" { count += 1 } }
         return CGFloat(lines) * lineHeight + 16
     }
 
