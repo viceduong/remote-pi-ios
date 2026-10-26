@@ -211,7 +211,7 @@ final class ActivityAndQATests: XCTestCase {
         // busySince in the future is ignored (clock skew) → local fallback.
         var future = AgentStatusState()
         future.apply(.status(busy: true, owner: "tui", v2: true, isSnapshot: false,
-                             activity: AgentActivity(kind: .tool, tool: "bash", busySince: nowMs + 120_000),
+                             activity: AgentActivity(kind: .tool, busySince: nowMs + 120_000, tool: "bash"),
                              hasActivity: true), now: now)
         XCTAssertEqual(future.activitySince, now)
     }
