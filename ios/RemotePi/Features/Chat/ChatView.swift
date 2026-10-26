@@ -180,18 +180,6 @@ struct ChatBottomBar: View {
             if let work = status.workingText {
                 WorkingBanner(text: work, kind: status.activityKind, since: status.activitySince)
             }
-            if let note = viewModel.queuedNote {
-                HStack(spacing: 6) {
-                    Image(systemName: "clock.arrow.circlepath")
-                    Text(note)
-                        .font(.caption2)
-                    Spacer()
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Color.orange.opacity(0.15))
-                .accessibilityElement(children: .combine)
-            }
             ChatStatsStrip(viewModel: viewModel, status: status)
             ComposerView { text in viewModel.send(text) }
         }

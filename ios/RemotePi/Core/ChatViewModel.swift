@@ -48,7 +48,6 @@ final class ChatViewModel: ObservableObject {
     @Published var questionText: [Int: String] = [:]
     @Published var errorMessage: String?
     @Published var infoMessage: String?
-    @Published private(set) var queuedNote: String?
     /// Set after a successful fork — ChatView pops back to the session list.
     @Published private(set) var shouldDismiss = false
 
@@ -366,12 +365,6 @@ final class ChatViewModel: ObservableObject {
         }
         let empty = items.isEmpty
         if transcriptIsEmpty != empty { transcriptIsEmpty = empty }
-
-        let waiting = reconciled.chips.filter { $0.item.status == "queued" }.count
-        let note: String? = waiting == 0 ? nil
-            : waiting == 1 ? "⏳ Queued — agent is busy, your message will go in when it finishes"
-            : "⏳ \(waiting) messages queued"
-        if queuedNote != note { queuedNote = note }
 
         scheduleCacheSave()
     }
