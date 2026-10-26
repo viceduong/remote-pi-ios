@@ -13,9 +13,12 @@ extension ChatMessage {
     /// and every other caller (contract v2 §4). A row is visible iff:
     /// - user (not a system/custom note) with non-blank text;
     /// - assistant with non-blank text (thinking excluded);
-    /// - error rows (`isError` on a non-tool row, or wire role "error").
-    /// Thinking-only rows, tool calls/results and custom notes are hidden.
+    /// - error rows (`isError` on a non-tool row, or wire role "error");
+    /// - the `ask_user_question` result carrying `qa` (contract §9 — the one
+    ///   visible tool row).
+    /// Thinking-only rows, other tool calls/results and custom notes are hidden.
     static func isVisibleInFocus(_ m: ChatMessage) -> Bool {
+        if m.qa != nil { return true }
         switch m.role {
         case .tool:
             return false
@@ -52,6 +55,8 @@ enum TextNormalizer {
 struct TranscriptItem: Equatable {
     enum Kind: String, Equatable {
         case user, assistant, error, queued, offline
+        /// Answered/declined `ask_user_question` (contract §9).
+        case qa
     }
 
     var id: String
@@ -65,6 +70,8 @@ struct TranscriptItem: Equatable {
     var cancellable = false
     /// Server queue item id (chips) or offline UUID string (offline rows).
     var actionId: String? = nil
+    /// Q&A rows: the structured questions/answers (`text` is the copy text).
+    var qa: QAInfo? = nil
 }
 
 // MARK: - Queue chip reconciliation (one chip per logical message)
@@ -167,21 +174,31 @@ enum QueueReconciler {
     }
 }
 
-// MARK: - Agent status reducer (contract v2 §5)
+// MARK: - Agent status reducer (contract v2 §5 + §7)
 
-/// Single source of truth for working/idle/error. Pure value type so it is
-/// unit-testable; `ChatLiveStatus` publishes its derived outputs.
+/// Single source of truth for working/idle/error and the activity label.
+/// Pure value type so it is unit-testable; `ChatLiveStatus` publishes its
+/// derived outputs.
+///
+/// Label precedence: crashed → pending question → (busy) the server's §7
+/// `activity` once the server sends it (authoritative), else the client
+/// heuristic from message/tool frames → optimistic "Waiting for response…".
 struct AgentStatusState: Equatable {
     enum Event {
         /// `agent_status` frame. `v2` = frame carried the v2 `busy`/`owner`
-        /// fields; `isSnapshot` = first status after a (re)connect.
-        case status(busy: Bool, owner: String?, v2: Bool, isSnapshot: Bool)
+        /// fields; `isSnapshot` = first status after a (re)connect;
+        /// `hasActivity` = frame carried the §7 `activity` key (even null).
+        case status(busy: Bool, owner: String?, v2: Bool, isSnapshot: Bool,
+                    activity: AgentActivity? = nil, hasActivity: Bool = false)
         /// User just sent a prompt (optimistic "Waiting for response…").
         case optimisticSend
         /// Send failed / aborted before reaching the agent.
         case clearOptimistic
-        /// Assistant/tool activity frame with an optional detail label.
-        case activity(detail: String?)
+        /// Client-side heuristic from assistant/tool frames (fallback for
+        /// servers without §7 `activity`); nil = activity without a label.
+        case activity(AgentActivity?)
+        /// A questionnaire card is shown locally (works on any server).
+        case questionCard(Bool)
         /// v1 lifecycle hints (agent_start/agent_end/file_update.working …);
         /// ignored once a v2 `agent_status` has been seen.
         case legacyBusy(Bool)
@@ -191,38 +208,66 @@ struct AgentStatusState: Equatable {
 
     private(set) var busy = false
     private(set) var optimisticSince: Date?
-    private(set) var detail: String?
+    /// Heuristic activity (only shown while `activityAware` is false).
+    private(set) var heuristic: AgentActivity?
     private(set) var crashed = false
     private(set) var v2 = false
     private(set) var owner: String?
     private(set) var lastActivity: Date?
+    /// An `agent_status` carried `activity` (§7): the server is then the
+    /// authority for the label and heuristics never override it.
+    private(set) var activityAware = false
+    private(set) var serverActivity: AgentActivity?
+    private(set) var questionCard = false
+    /// LOCAL clock time the displayed activity (kind + tool) started — the
+    /// banner's elapsed counter. Immune to server clock skew.
+    private(set) var activitySince: Date?
+    private var activityKey: String?
 
     /// Snapshot "idle" frames must not erase a send made moments ago (the
     /// reconnect snapshot can predate the turn start).
     static let optimisticGrace: TimeInterval = 8
+    /// A snapshot's server `since` is trusted only when it is this recent.
+    static let maxSnapshotAge: TimeInterval = 3600
 
     var isBusy: Bool { busy || optimisticSince != nil }
 
+    /// What the banner shows (nil = idle, optimistic or crashed).
+    var displayActivity: AgentActivity? {
+        if crashed { return nil }
+        if serverActivity?.kind == .question { return serverActivity }
+        if questionCard { return AgentActivity(kind: .question) }
+        guard busy else { return nil }
+        if activityAware { return serverActivity ?? AgentActivity(kind: .waiting) }
+        return heuristic ?? AgentActivity(kind: .waiting)
+    }
+
     var workingText: String? {
         if crashed { return "Agent crashed — restarting…" }
-        if busy { return detail ?? "Working…" }
+        if let activity = displayActivity { return activity.label }
         if optimisticSince != nil { return "Waiting for response…" }
         return nil
     }
 
     mutating func apply(_ event: Event, now: Date = Date()) {
+        var snapshotSince: Int?
         switch event {
-        case let .status(isBusy, owner, isV2, isSnapshot):
+        case let .status(isBusy, owner, isV2, isSnapshot, activity, hasActivity):
             if isV2 { v2 = true }
             if let owner { self.owner = owner }
             crashed = false
+            if hasActivity {
+                activityAware = true
+                serverActivity = activity
+                if isSnapshot { snapshotSince = activity?.since }
+            }
             if isBusy {
-                if !busy { detail = nil }
+                if !busy { heuristic = nil }
                 busy = true
                 optimisticSince = nil
             } else {
                 busy = false
-                detail = nil
+                heuristic = nil
                 if let since = optimisticSince {
                     let fresh = now.timeIntervalSince(since) < Self.optimisticGrace
                     if !(isSnapshot && fresh) { optimisticSince = nil }
@@ -233,14 +278,16 @@ struct AgentStatusState: Equatable {
             crashed = false
         case .clearOptimistic:
             optimisticSince = nil
-        case let .activity(label):
+        case let .activity(activity):
             lastActivity = now
             if !v2 {
                 busy = true
                 optimisticSince = nil
                 crashed = false
             }
-            if let label, busy || optimisticSince != nil { detail = label }
+            if let activity, busy || optimisticSince != nil { heuristic = activity }
+        case let .questionCard(shown):
+            questionCard = shown
         case let .legacyBusy(isBusy):
             guard !v2 else { return }
             if isBusy {
@@ -249,7 +296,7 @@ struct AgentStatusState: Equatable {
                 crashed = false
             } else {
                 busy = false
-                detail = nil
+                heuristic = nil
                 if let since = optimisticSince, now.timeIntervalSince(since) >= Self.optimisticGrace {
                     optimisticSince = nil
                 }
@@ -257,21 +304,73 @@ struct AgentStatusState: Equatable {
         case .crashed:
             crashed = true
             busy = false
-            detail = nil
+            heuristic = nil
+            serverActivity = nil
             optimisticSince = nil
         case .exited:
             optimisticSince = nil
             if !v2 {
                 busy = false
-                detail = nil
+                heuristic = nil
             }
         }
+        updateActivityClock(now: now, snapshotSince: snapshotSince)
     }
 
     /// Drop a stale optimistic state (no agent_status/activity confirmed it).
     mutating func expireOptimistic(olderThan seconds: TimeInterval, now: Date = Date()) -> Bool {
         guard let since = optimisticSince, now.timeIntervalSince(since) >= seconds else { return false }
         optimisticSince = nil
+        updateActivityClock(now: now, snapshotSince: nil)
         return true
+    }
+
+    /// Restart the elapsed clock only when WHAT is happening changes. The
+    /// server's `since` is used only for a transition first seen in a
+    /// reconnect snapshot, and only when plausible (in the past, < 1h).
+    private mutating func updateActivityClock(now: Date, snapshotSince: Int?) {
+        let key: String?
+        if let activity = displayActivity {
+            key = activity.phaseKey
+        } else if !crashed, optimisticSince != nil {
+            key = "optimistic"
+        } else {
+            key = nil
+        }
+        guard key != activityKey else { return }
+        activityKey = key
+        guard key != nil else {
+            activitySince = nil
+            return
+        }
+        if key == "optimistic", let since = optimisticSince {
+            activitySince = since
+            return
+        }
+        if let ms = snapshotSince {
+            let start = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+            let age = now.timeIntervalSince(start)
+            if age >= 0, age < Self.maxSnapshotAge {
+                activitySince = start
+                return
+            }
+        }
+        activitySince = now
+    }
+}
+
+// MARK: - Elapsed label
+
+enum ElapsedFormatter {
+    /// Shown only once an activity has lasted this long.
+    static let minimumSeconds: TimeInterval = 3
+
+    /// "· 12s", "· 1m 05s", "· 1h 02m"; nil below `minimumSeconds`.
+    static func label(_ seconds: TimeInterval) -> String? {
+        guard seconds.isFinite, seconds >= minimumSeconds else { return nil }
+        let total = Int(seconds)
+        if total < 60 { return "· \(total)s" }
+        if total < 3600 { return String(format: "· %dm %02ds", total / 60, total % 60) }
+        return String(format: "· %dh %02dm", total / 3600, (total % 3600) / 60)
     }
 }

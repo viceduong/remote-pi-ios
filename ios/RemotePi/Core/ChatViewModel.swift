@@ -35,7 +35,15 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var loadPhase: LoadPhase = .loading
     @Published private(set) var transcriptIsEmpty = true
     /// Unanswered `ask_user_question` questionnaire (card above the composer).
-    @Published private(set) var pendingQuestion: AgentQuestion?
+    /// Mirrored into the status reducer ("Waiting for your answer" even on
+    /// servers without §7 activity).
+    @Published private(set) var pendingQuestion: AgentQuestion? {
+        didSet {
+            if (oldValue == nil) != (pendingQuestion == nil) {
+                status.apply(.questionCard(pendingQuestion != nil))
+            }
+        }
+    }
     @Published var questionSelections: [Int: Set<String>] = [:]
     @Published var questionText: [Int: String] = [:]
     @Published var errorMessage: String?
@@ -98,6 +106,11 @@ final class ChatViewModel: ObservableObject {
     private var pendingDelta = ""
     /// Batched file_update pushes.
     private var pendingFileMessages: [ChatMessage] = []
+    /// Questionnaire ids the server resolved/dropped (§8) — a failed POST
+    /// must not resurrect them.
+    private var resolvedQuestionIds = Set<String>()
+    /// Questionnaire whose answer POST is in flight (card already removed).
+    private var answeringQuestionId: String?
 
     // MARK: Owned tasks (all cancelled in `stop()`)
 
@@ -331,6 +344,10 @@ final class ChatViewModel: ObservableObject {
     }
 
     nonisolated static func transcriptItem(for m: ChatMessage, streaming: Bool) -> TranscriptItem {
+        if let qa = m.qa {
+            return TranscriptItem(id: m.id, kind: .qa, text: qa.transcriptText, entryId: m.entryId,
+                                  statusText: qa.cancelled ? "Declined" : "Answered", qa: qa)
+        }
         switch m.role {
         case .user:
             return TranscriptItem(id: m.id, kind: .user, text: m.text, entryId: m.entryId)
@@ -446,9 +463,9 @@ final class ChatViewModel: ObservableObject {
     }
 
     /// Tool rows are never rendered (focus mode is fixed on) — keep them out
-    /// of the model entirely.
-    private static func displayable(_ rows: [ChatMessage]) -> [ChatMessage] {
-        rows.filter { $0.role != .tool }
+    /// of the model entirely. Exception: Q&A rows (contract §9).
+    nonisolated static func displayable(_ rows: [ChatMessage]) -> [ChatMessage] {
+        rows.filter { $0.role != .tool || $0.qa != nil }
     }
 
     /// Delta refresh by entry-id cursor. Coalesced: concurrent callers share
@@ -815,23 +832,45 @@ final class ChatViewModel: ObservableObject {
         spawn { [weak self] in await self?.cancelQuestion() }
     }
 
-    /// Build and POST the questionnaire answers. Single-select questions take
-    /// one label (or typed text), multi-select take the selected set.
-    func submitQuestion() async {
-        guard let question = pendingQuestion else { return }
+    func chatAboutQuestionAction() {
+        spawn { [weak self] in await self?.chatAboutQuestion() }
+    }
+
+    /// Every question has a selection or typed text (Submit enabled).
+    var questionIsComplete: Bool {
+        guard let question = pendingQuestion else { return false }
+        return ChatViewModel.isComplete(question, selections: questionSelections, text: questionText)
+    }
+
+    nonisolated static func isComplete(_ question: AgentQuestion,
+                                       selections: [Int: Set<String>],
+                                       text: [Int: String]) -> Bool {
+        question.items.allSatisfy { item in
+            let picked = item.options.contains { (selections[item.index] ?? []).contains($0.label) }
+            return picked || (text[item.index] ?? "").hasVisibleCharacters
+        }
+    }
+
+    /// pi's QuestionAnswer shape (contract §8):
+    /// - single option → `option`, answer = label;
+    /// - typed text (no option) → `custom`, answer = text;
+    /// - multi with selections → `multi`, selected = labels, answer = labels
+    ///   joined ", ", typed text as `notes`.
+    /// Questions with neither are skipped (Submit is disabled until complete).
+    nonisolated static func buildAnswers(_ question: AgentQuestion,
+                                         selections: [Int: Set<String>],
+                                         text: [Int: String]) -> [APIClient.QuestionAnswerPayload] {
         var answers: [APIClient.QuestionAnswerPayload] = []
         for item in question.items {
-            let typed = questionText[item.index]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let selected = questionSelections[item.index] ?? []
-            if item.multiSelect {
-                let labels = item.options.map(\.label).filter { selected.contains($0) }
-                if !labels.isEmpty || !typed.isEmpty {
-                    answers.append(.init(questionIndex: item.index, question: item.question,
-                                         kind: "multi", answer: labels.joined(separator: ", "),
-                                         selected: labels, notes: typed.isEmpty ? nil : typed,
-                                         preview: nil))
-                }
-            } else if let label = item.options.map(\.label).first(where: { selected.contains($0) }) {
+            let typed = text[item.index]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let selected = selections[item.index] ?? []
+            let labels = item.options.map(\.label).filter { selected.contains($0) }
+            if item.multiSelect, !labels.isEmpty {
+                answers.append(.init(questionIndex: item.index, question: item.question,
+                                     kind: "multi", answer: labels.joined(separator: ", "),
+                                     selected: labels, notes: typed.isEmpty ? nil : typed,
+                                     preview: nil))
+            } else if !item.multiSelect, let label = labels.first {
                 let preview = item.options.first { $0.label == label }?.preview
                 answers.append(.init(questionIndex: item.index, question: item.question,
                                      kind: "option", answer: label, selected: nil,
@@ -842,8 +881,29 @@ final class ChatViewModel: ObservableObject {
                                      notes: nil, preview: nil))
             }
         }
+        return answers
+    }
+
+    /// "Chat about this": answer every question with kind `chat`.
+    nonisolated static func chatAnswers(_ question: AgentQuestion) -> [APIClient.QuestionAnswerPayload] {
+        question.items.map { item in
+            APIClient.QuestionAnswerPayload(questionIndex: item.index, question: item.question, kind: "chat",
+                                            answer: "Chat about this", selected: nil, notes: nil, preview: nil)
+        }
+    }
+
+    /// Build and POST the questionnaire answers.
+    func submitQuestion() async {
+        guard let question = pendingQuestion, questionIsComplete else { return }
+        let answers = ChatViewModel.buildAnswers(question, selections: questionSelections, text: questionText)
         guard !answers.isEmpty else { return }
         await sendQuestionAnswers(question.requestId, answers: answers, cancelled: false)
+    }
+
+    func chatAboutQuestion() async {
+        guard let question = pendingQuestion else { return }
+        await sendQuestionAnswers(question.requestId, answers: ChatViewModel.chatAnswers(question),
+                                  cancelled: false)
     }
 
     func cancelQuestion() async {
@@ -855,18 +915,37 @@ final class ChatViewModel: ObservableObject {
                                      answers: [APIClient.QuestionAnswerPayload],
                                      cancelled: Bool) async {
         let answered = pendingQuestion
+        let selections = questionSelections
+        let text = questionText
+        answeringQuestionId = requestId
         pendingQuestion = nil
         questionSelections = [:]
         questionText = [:]
+        defer { if answeringQuestionId == requestId { answeringQuestionId = nil } }
         do {
             try await client.answerQuestion(sessionId, requestId: requestId,
                                             answers: answers, cancelled: cancelled)
         } catch {
-            // Keep the card if the answer didn't reach the server — but a
-            // cancelled request (view gone) is not an error.
-            if let answered, pendingQuestion == nil { pendingQuestion = answered }
+            // The answer didn't reach the server: restore the card (with the
+            // user's choices) unless the server resolved it meanwhile or a
+            // newer questionnaire replaced it. A cancelled request (view gone)
+            // is not surfaced as an error.
+            if let answered, pendingQuestion == nil, !resolvedQuestionIds.contains(requestId) {
+                pendingQuestion = answered
+                questionSelections = selections
+                questionText = text
+            }
             surface(error)
         }
+    }
+
+    /// Server says this questionnaire is no longer pending (§8).
+    private func markQuestionResolved(_ requestId: String) {
+        resolvedQuestionIds.insert(requestId)
+        guard pendingQuestion?.requestId == requestId else { return }
+        pendingQuestion = nil
+        questionSelections = [:]
+        questionText = [:]
     }
 
     // MARK: - SSE
@@ -944,11 +1023,12 @@ final class ChatViewModel: ObservableObject {
             status.apply(.exited)
         case "agent_crashed":
             status.apply(.crashed)
-        case "tool_execution_start", "tool_execution_end":
-            let name = obj["toolName"] as? String
-            status.apply(.activity(detail: name.map { "Running \($0)…" }))
+        case "tool_execution_start":
+            status.apply(.activity(AgentActivity(kind: .tool, tool: obj["toolName"] as? String)))
+        case "tool_execution_end":
+            status.apply(.activity(AgentActivity(kind: .waiting)))
         case "tool_execution_update":
-            status.apply(.activity(detail: nil))
+            status.apply(.activity(nil))
         case "message_start":
             handleMessageStart(obj)
         case "message_update":
@@ -961,16 +1041,19 @@ final class ChatViewModel: ObservableObject {
             handleQueueUpdate(obj)
         case "agent_question":
             if let question = AgentQuestion(json: obj) {
+                // Same card re-sent (reconnect replay): keep the user's picks.
+                if pendingQuestion?.requestId != question.requestId {
+                    questionSelections = [:]
+                    questionText = [:]
+                }
+                resolvedQuestionIds.remove(question.requestId)
                 pendingQuestion = question
-                questionSelections = [:]
-                questionText = [:]
             }
         case "agent_question_resolved":
-            let resolvedId = obj["requestId"] as? String
-            if resolvedId == nil || resolvedId == pendingQuestion?.requestId {
-                pendingQuestion = nil
-                questionSelections = [:]
-                questionText = [:]
+            if let resolvedId = obj["requestId"] as? String {
+                markQuestionResolved(resolvedId)
+            } else if let current = pendingQuestion?.requestId {
+                markQuestionResolved(current)
             }
         default:
             break
@@ -992,7 +1075,22 @@ final class ChatViewModel: ObservableObject {
         let snapshot = awaitingSnapshot
         awaitingSnapshot = false
         if !busy { flushPendingDelta() }
-        status.apply(.status(busy: busy, owner: obj["owner"] as? String, v2: v2, isSnapshot: snapshot))
+        // §7: the key's presence (even null) marks an activity-aware server.
+        let hasActivity = obj.keys.contains("activity")
+        let activity = (obj["activity"] as? [String: Any]).flatMap(AgentActivity.init(json:))
+        status.apply(.status(busy: busy, owner: obj["owner"] as? String, v2: v2, isSnapshot: snapshot,
+                             activity: activity, hasActivity: hasActivity))
+        // §8: `questionId` mirrors the server's pending questionnaire — any
+        // card (or in-flight answer) with a different id is stale.
+        if obj.keys.contains("questionId") {
+            let questionId = obj["questionId"] as? String
+            if let current = pendingQuestion?.requestId, current != questionId {
+                markQuestionResolved(current)
+            }
+            if let answering = answeringQuestionId, answering != questionId {
+                resolvedQuestionIds.insert(answering)
+            }
+        }
         if let error = obj["error"] as? String, error.hasVisibleCharacters {
             if error != lastAgentError {
                 lastAgentError = error
@@ -1005,8 +1103,12 @@ final class ChatViewModel: ObservableObject {
 
     private func handleMessageStart(_ obj: [String: Any]) {
         guard let msg = obj["message"] as? [String: Any] else { return }
+        if let qaRow = ChatViewModel.qaMessage(event: obj, message: msg) {
+            upsertQA(qaRow)
+            return
+        }
         if ChatViewModel.isToolMessage(msg) {
-            status.apply(.activity(detail: nil))
+            status.apply(.activity(nil))
             return
         }
         let mapped = ChatMessage.fromAgentMessage(msg)
@@ -1016,7 +1118,7 @@ final class ChatViewModel: ObservableObject {
         case .user:
             upsertUserEcho(mapped)
         case .assistant:
-            status.apply(.activity(detail: nil))
+            status.apply(.activity(nil))
             beginAssistant(mapped)
         }
     }
@@ -1027,29 +1129,31 @@ final class ChatViewModel: ObservableObject {
         }
         let msg = obj["message"] as? [String: Any]
         if let msg, ChatViewModel.isToolMessage(msg) {
-            status.apply(.activity(detail: nil))
+            status.apply(.activity(nil))
             return
         }
         guard let ev = obj["assistantMessageEvent"] as? [String: Any] else {
-            status.apply(.activity(detail: nil))
+            status.apply(.activity(nil))
             return
         }
+        // Heuristic labels: fallback only — once the server sends §7
+        // `activity`, the reducer ignores them for the label.
         let type = ev["type"] as? String ?? ""
         switch type {
         case "text_delta":
-            status.apply(.activity(detail: "Writing…"))
+            status.apply(.activity(AgentActivity(kind: .writing)))
             if let delta = ev["delta"] as? String, !delta.isEmpty { accumulate(delta) }
         case "thinking_start", "thinking_delta":
-            status.apply(.activity(detail: "Thinking…"))
+            status.apply(.activity(AgentActivity(kind: .thinking)))
         case "toolcall_start":
             let name = (ev["toolName"] as? String)
                 ?? ((ev["toolCall"] as? [String: Any])?["name"] as? String)
-            status.apply(.activity(detail: name.map { "Calling \($0)…" }))
+            status.apply(.activity(AgentActivity(kind: .toolcall, tool: name)))
         case "done", "error":
             flushPendingDelta()
             if let msg { finalizeAssistant(ChatMessage.fromAgentMessage(msg)) }
         default:
-            status.apply(.activity(detail: nil))
+            status.apply(.activity(nil))
         }
     }
 
@@ -1057,6 +1161,10 @@ final class ChatViewModel: ObservableObject {
         flushPendingDelta()
         guard let msg = obj["message"] as? [String: Any] else {
             streamingId = nil
+            return
+        }
+        if let qaRow = ChatViewModel.qaMessage(event: obj, message: msg) {
+            upsertQA(qaRow)
             return
         }
         if ChatViewModel.isToolMessage(msg) { return }
@@ -1075,8 +1183,8 @@ final class ChatViewModel: ObservableObject {
         // v1 hint only; ignored once v2 agent_status frames are seen.
         if let working = obj["working"] as? Bool { status.apply(.legacyBusy(working)) }
         guard let msg = obj["message"] as? [String: Any] else { return }
-        let mapped = ChatMessage.fromAgentMessage(msg)
-        guard mapped.role != .tool else { return }
+        let mapped = ChatViewModel.qaMessage(event: obj, message: msg) ?? ChatMessage.fromAgentMessage(msg)
+        guard mapped.role != .tool || mapped.qa != nil else { return }
         // Batch bursts (open-time replay + live host writes) into one merge.
         pendingFileMessages.append(mapped)
         guard fileFlushTask == nil else { return }
@@ -1110,6 +1218,23 @@ final class ChatViewModel: ObservableObject {
     private func upsertUserEcho(_ mapped: ChatMessage) {
         guard mapped.text.hasVisibleCharacters else { return }
         ChatMerger.merge(&messages, [mapped])
+    }
+
+    /// Q&A rows (contract §9) arrive on message_start AND message_end (and
+    /// later file_update / history) — identity-merged into one row.
+    private func upsertQA(_ mapped: ChatMessage) {
+        ChatMerger.merge(&messages, [mapped])
+    }
+
+    /// The `ask_user_question` result as a Q&A row when the server attached
+    /// `qa` (on the message copy or the event itself); nil otherwise —
+    /// older servers keep today's behaviour (tool rows hidden).
+    nonisolated static func qaMessage(event: [String: Any], message: [String: Any]) -> ChatMessage? {
+        guard message["qa"] != nil || event["qa"] != nil else { return nil }
+        var mapped = ChatMessage.fromAgentMessage(message)
+        guard mapped.role == .tool else { return nil }
+        if mapped.qa == nil { mapped.qa = QAInfo(json: event["qa"]) }
+        return mapped.qa == nil ? nil : mapped
     }
 
     private func streamingIndex() -> Int? {

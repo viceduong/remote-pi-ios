@@ -83,6 +83,9 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
     /// Ids that must be re-rendered regardless of content equality.
     private var forceRender = Set<String>()
     private var renderAll = false
+    /// Row whose expand/collapse is pending: anchored on its own bottom edge
+    /// (where the tapped footer is) instead of a neighbouring row.
+    private var toggleAnchorId: String?
     private var renderTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
     private var lastWidth: CGFloat = 0
@@ -300,7 +303,13 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
             .union(batch.compactMap { item in
                 oldIds.contains(item.id) && items[item.id] != item ? item.id : nil
             })
-        let anchor = pinned ? nil : captureAnchor(excluding: changedIds)
+        var anchor: Anchor?
+        if let toggled = toggleAnchorId,
+           rendered[toggled] != nil || !batch.contains(where: { $0.id == toggled }) {
+            toggleAnchorId = nil
+            if !pinned { anchor = edgeAnchor(for: toggled) }
+        }
+        if anchor == nil, !pinned { anchor = captureAnchor(excluding: changedIds) }
         var heightChanged = false
         for (id, render) in rendered {
             if let old = rows[id], old.layout.height != render.layout.height { heightChanged = true }
@@ -373,6 +382,7 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
     private func toggleExpanded(id: String) {
         if expanded.contains(id) { expanded.remove(id) } else { expanded.insert(id) }
         forceRender.insert(id)
+        toggleAnchorId = id
         receive(latestItems)
     }
 
@@ -383,8 +393,16 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
         return render.layout.height
     }
 
+    func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        (cell as? TranscriptCell)?.updateVisibleSegments()
+    }
+
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         updateScrollState()
+        // Tall (segmented) rows materialize only the segments near the viewport.
+        for case let cell as TranscriptCell in tableView.visibleCells where cell.isSegmented {
+            cell.updateVisibleSegments()
+        }
         let visualTopDistance = scrollView.contentSize.height + scrollView.contentInset.bottom
             - (scrollView.contentOffset.y + scrollView.bounds.height)
         if visualTopDistance < 800, !order.isEmpty {
@@ -490,6 +508,16 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
     private struct Anchor {
         let id: String
         let offset: CGFloat
+    }
+
+    /// Anchor on a row's VISUAL bottom edge (table-space minY in the inverted
+    /// table). Expanding/collapsing grows/shrinks a row upward from that
+    /// edge, so the tapped "Show all / Show less" footer stays put.
+    private func edgeAnchor(for id: String) -> Anchor? {
+        guard let row = indexById[id], tableView.numberOfSections > 0,
+              row < tableView.numberOfRows(inSection: 0) else { return nil }
+        let rect = tableView.rectForRow(at: IndexPath(row: row, section: 0))
+        return Anchor(id: id, offset: rect.minY - tableView.contentOffset.y)
     }
 
     /// First visible row whose content is NOT changing in this update.

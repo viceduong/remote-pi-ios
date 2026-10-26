@@ -3,10 +3,17 @@ import UIKit
 /// Draws a pre-rendered attributed string with the SAME string-drawing
 /// engine (and wrap width) used to measure it off-main, so text never
 /// truncates or reflows differently from the precomputed layout.
+///
+/// Its backing store is the size of its bounds, so a view is never given
+/// more than one segment of a tall body (see `TextChunker`).
 final class AttributedTextView: UIView {
     var attributedText: NSAttributedString? {
         didSet {
-            if attributedText !== oldValue { setNeedsDisplay() }
+            guard attributedText !== oldValue else { return }
+            // A re-render with identical content (e.g. earlier segments of a
+            // streaming reply) must not redraw.
+            if let new = attributedText, let old = oldValue, new.isEqual(to: old) { return }
+            setNeedsDisplay()
         }
     }
 
@@ -52,11 +59,20 @@ final class HitExpandedButton: UIButton {
 /// One transcript row. Plain UIKit, manual frames from the precomputed
 /// `RowLayout`; no gestures besides real buttons (the context menu is
 /// provided by the table delegate), so scrolling always starts instantly.
+///
+/// Tall bodies (`layout.chunks` non-empty) are drawn by a small pool of
+/// segment views materialized only near the visible viewport — memory stays
+/// bounded however tall the row is (an expanded 5,000-line paste).
 final class TranscriptCell: UITableViewCell {
     static let reuseId = "TranscriptCell"
+    /// Segments within this distance of the viewport keep their content.
+    static let segmentMargin: CGFloat = 400
 
     private let bubble = UIView()
     private let textView = AttributedTextView()
+    /// Accessibility element covering a segmented body (plain view: no
+    /// drawing, no backing store).
+    private let segmentedAccessibility = UIView()
     private let headerIcon = UIImageView()
     private let headerLabel = UILabel()
     private let actionButton = HitExpandedButton(type: .system)
@@ -66,9 +82,16 @@ final class TranscriptCell: UITableViewCell {
     private(set) var kind: TranscriptItem.Kind = .assistant
     private var bubbleColor: UIColor = .clear
     private var bubbleCorner: CGFloat = 0
+    private var fullBody: NSAttributedString?
+    private var segments: [NSAttributedString] = []
+    private var activeSegmentViews: [Int: AttributedTextView] = [:]
+    private var freeSegmentViews: [AttributedTextView] = []
 
     var onAction: (() -> Void)?
     var onToggleExpand: (() -> Void)?
+
+    /// Row body is drawn as stacked segments.
+    var isSegmented: Bool { !segments.isEmpty }
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -82,6 +105,12 @@ final class TranscriptCell: UITableViewCell {
         bubble.layer.cornerCurve = .continuous
         contentView.addSubview(bubble)
         contentView.addSubview(textView)
+
+        segmentedAccessibility.isUserInteractionEnabled = false
+        segmentedAccessibility.isAccessibilityElement = true
+        segmentedAccessibility.accessibilityTraits = .staticText
+        segmentedAccessibility.isHidden = true
+        contentView.addSubview(segmentedAccessibility)
 
         headerIcon.contentMode = .scaleAspectFit
         headerIcon.isAccessibilityElement = false
@@ -106,43 +135,78 @@ final class TranscriptCell: UITableViewCell {
         super.prepareForReuse()
         onAction = nil
         onToggleExpand = nil
+        // Free segment backing stores right away (the next row may be short).
+        recycleAllSegments()
     }
 
     func configure(item: TranscriptItem, render: RowRender, style: TranscriptStyle, expanded: Bool) {
         kind = item.kind
         layout = render.layout
-        textView.attributedText = render.body
-        textView.drawWidth = render.layout.drawWidth
+        fullBody = render.body
+        segments = render.layout.chunks.count == render.segments.count ? render.segments : []
 
+        let accessibilityText: String
         switch item.kind {
         case .user:
             bubbleColor = style.userBubble
             bubbleCorner = TranscriptMetrics.userCorner
-            textView.accessibilityLabel = "You: " + item.text
+            accessibilityText = "You: " + item.text
         case .assistant:
             bubbleColor = .clear
             bubbleCorner = 0
-            textView.accessibilityLabel = "Assistant: " + item.text
+            accessibilityText = "Assistant: " + item.text
         case .error:
             bubbleColor = style.errorBackground
             bubbleCorner = TranscriptMetrics.errorCorner
-            textView.accessibilityLabel = "Error: " + item.text
+            accessibilityText = "Error: " + item.text
         case .queued:
             bubbleColor = style.chipBackground
             bubbleCorner = TranscriptMetrics.userCorner
-            textView.accessibilityLabel = "Queued message, \(item.statusText ?? "queued"): " + item.text
+            accessibilityText = "Queued message, \(item.statusText ?? "queued"): " + item.text
         case .offline:
             bubbleColor = style.offlineBackground
             bubbleCorner = TranscriptMetrics.userCorner
-            textView.accessibilityLabel = "Unsent message, waiting for connection: " + item.text
+            accessibilityText = "Unsent message, waiting for connection: " + item.text
+        case .qa:
+            bubbleColor = style.secondaryBackground
+            bubbleCorner = TranscriptMetrics.errorCorner
+            accessibilityText = item.qa?.cancelled == true
+                ? "Question declined"
+                : "Question answered. " + item.text
         }
         bubble.backgroundColor = bubbleColor
         bubble.layer.cornerRadius = bubbleCorner
         bubble.isHidden = render.layout.bubble == .zero
 
+        if segments.isEmpty {
+            recycleAllSegments()
+            textView.isHidden = false
+            textView.attributedText = render.body
+            textView.drawWidth = render.layout.drawWidth
+            textView.accessibilityLabel = accessibilityText
+            segmentedAccessibility.isHidden = true
+        } else {
+            textView.isHidden = true
+            textView.attributedText = nil
+            segmentedAccessibility.isHidden = false
+            segmentedAccessibility.accessibilityLabel = accessibilityText
+            // Re-point already materialized segments at the new slices
+            // (identical slices don't redraw); `layoutSubviews` fixes the set.
+            for (index, view) in activeSegmentViews {
+                if index < segments.count {
+                    view.attributedText = segments[index]
+                    view.drawWidth = layout.drawWidth
+                } else {
+                    activeSegmentViews[index] = nil
+                    recycle(view)
+                }
+            }
+        }
+
         let isChip = item.kind == .queued || item.kind == .offline
-        headerIcon.isHidden = !isChip
-        headerLabel.isHidden = !isChip
+        let hasHeader = isChip || item.kind == .qa
+        headerIcon.isHidden = !hasHeader
+        headerLabel.isHidden = !hasHeader
         actionButton.isHidden = !(isChip && item.cancellable)
         if isChip {
             let tint = item.kind == .queued ? style.chipTint : style.secondaryText
@@ -154,6 +218,13 @@ final class TranscriptCell: UITableViewCell {
             actionButton.tintColor = style.secondaryText
             actionButton.accessibilityLabel = item.kind == .queued
                 ? "Cancel queued message" : "Discard unsent message"
+        } else if item.kind == .qa {
+            let tint = item.qa?.cancelled == true ? style.secondaryText : style.accent
+            headerIcon.image = UIImage(systemName: "questionmark.bubble")
+            headerIcon.tintColor = tint
+            headerLabel.text = item.statusText
+            headerLabel.font = style.headerFont
+            headerLabel.textColor = tint
         }
 
         if let title = render.footerTitle {
@@ -175,7 +246,9 @@ final class TranscriptCell: UITableViewCell {
         super.layoutSubviews()
         let l = layout
         bubble.frame = l.bubble
-        textView.frame = l.text
+        // Hidden draw views get a zero frame: no backing store at all.
+        textView.frame = textView.isHidden ? .zero : l.text
+        segmentedAccessibility.frame = segmentedAccessibility.isHidden ? .zero : l.text
         if !headerIcon.isHidden {
             let h = l.header
             let m = TranscriptMetrics.self
@@ -191,29 +264,115 @@ final class TranscriptCell: UITableViewCell {
         if !footerButton.isHidden {
             footerButton.frame = l.footer
         }
+        updateVisibleSegments()
     }
 
-    /// Frame (contentView coordinates) used for the context-menu preview.
+    // MARK: Segments (tall bodies)
+
+    /// Materialize the segments near the table's viewport, release the rest.
+    /// Called on layout and by the table on scroll / willDisplay.
+    func updateVisibleSegments() {
+        let chunks = layout.chunks
+        guard !segments.isEmpty, chunks.count == segments.count else {
+            recycleAllSegments()
+            return
+        }
+        // Not in a table yet: keep what we have until the next layout pass.
+        guard let scrollView = enclosingScrollView() else { return }
+        // Both the table and contentView are flipped; `convert` applies both.
+        let visible = contentView.convert(scrollView.bounds, from: scrollView)
+        let minY = visible.minY - Self.segmentMargin
+        let maxY = visible.maxY + Self.segmentMargin
+        var wanted: [Int] = []
+        for (index, chunk) in chunks.enumerated() where chunk.frame.maxY >= minY && chunk.frame.minY <= maxY {
+            wanted.append(index)
+        }
+        let wantedSet = Set(wanted)
+        for (index, view) in activeSegmentViews where !wantedSet.contains(index) {
+            activeSegmentViews[index] = nil
+            recycle(view)
+        }
+        for index in wanted {
+            let view = activeSegmentViews[index] ?? dequeueSegmentView()
+            activeSegmentViews[index] = view
+            if view.frame != chunks[index].frame { view.frame = chunks[index].frame }
+            view.drawWidth = layout.drawWidth
+            view.attributedText = segments[index]
+            view.isHidden = false
+        }
+    }
+
+    private func enclosingScrollView() -> UIScrollView? {
+        var view = superview
+        while let current = view {
+            if let scrollView = current as? UIScrollView { return scrollView }
+            view = current.superview
+        }
+        return nil
+    }
+
+    private func dequeueSegmentView() -> AttributedTextView {
+        if let view = freeSegmentViews.popLast() { return view }
+        let view = AttributedTextView()
+        view.isAccessibilityElement = false
+        contentView.insertSubview(view, aboveSubview: textView)
+        return view
+    }
+
+    private func recycle(_ view: AttributedTextView) {
+        view.attributedText = nil
+        view.isHidden = true
+        view.frame = .zero
+        view.layer.contents = nil
+        freeSegmentViews.append(view)
+    }
+
+    private func recycleAllSegments() {
+        guard !activeSegmentViews.isEmpty else { return }
+        for view in activeSegmentViews.values { recycle(view) }
+        activeSegmentViews.removeAll()
+    }
+
+    // MARK: Context-menu preview
+
+    /// Frame (contentView coordinates) used for the context-menu preview —
+    /// capped to the first `previewMaxTextHeight` of the body.
     var previewFrame: CGRect {
-        layout.bubble != .zero ? layout.bubble : layout.text.insetBy(dx: -6, dy: -4)
+        var frame = layout.bubble != .zero ? layout.bubble : layout.text.insetBy(dx: -6, dy: -4)
+        let excess = layout.text.height - TranscriptMetrics.previewMaxTextHeight
+        if excess > 0 { frame.size.height -= excess }
+        return frame
     }
 
     /// A fresh, UN-transformed copy of the row's bubble for the context-menu
     /// preview (snapshots of the flipped contentView would render upside
-    /// down).
+    /// down). Never taller than `previewFrame`, whatever the row height.
     func makePreviewView() -> UIView {
         let frame = previewFrame
         let container = UIView(frame: CGRect(origin: .zero, size: frame.size))
         container.backgroundColor = bubbleColor == .clear ? (superview?.backgroundColor ?? .systemBackground) : bubbleColor
         container.layer.cornerRadius = max(bubbleCorner, 10)
         container.layer.cornerCurve = .continuous
+        container.clipsToBounds = true
         let copy = AttributedTextView(frame: CGRect(x: layout.text.minX - frame.minX,
                                                     y: layout.text.minY - frame.minY,
                                                     width: layout.text.width,
-                                                    height: layout.text.height))
+                                                    height: min(layout.text.height, TranscriptMetrics.previewMaxTextHeight)))
         copy.drawWidth = layout.drawWidth
-        copy.attributedText = textView.attributedText
+        copy.attributedText = segments.first ?? fullBody
         container.addSubview(copy)
+        if kind == .qa, !headerIcon.isHidden {
+            let icon = UIImageView(image: headerIcon.image)
+            icon.tintColor = headerIcon.tintColor
+            icon.contentMode = .scaleAspectFit
+            icon.frame = headerIcon.frame.offsetBy(dx: -frame.minX, dy: -frame.minY)
+            let label = UILabel(frame: headerLabel.frame.offsetBy(dx: -frame.minX, dy: -frame.minY))
+            label.text = headerLabel.text
+            label.font = headerLabel.font
+            label.textColor = headerLabel.textColor
+            container.addSubview(icon)
+            container.addSubview(label)
+        }
         return container
     }
 

@@ -63,6 +63,14 @@ struct TranscriptStyle {
 /// the main thread with the same string-drawing engine the cell draws with,
 /// so heights are exact — no estimated-height corrections, ever).
 struct RowLayout: Equatable {
+    /// One vertical segment of a tall body (see `TextChunker`).
+    struct Chunk: Equatable {
+        /// UTF-16 range of the body drawn by this segment.
+        var range: NSRange
+        /// Frame in contentView coordinates.
+        var frame: CGRect
+    }
+
     var width: CGFloat = 0
     var height: CGFloat = 44
     var bubble: CGRect = .zero
@@ -71,6 +79,9 @@ struct RowLayout: Equatable {
     var drawWidth: CGFloat = 0
     var header: CGRect = .zero
     var footer: CGRect = .zero
+    /// Tall bodies are drawn as stacked segments (empty = one view draws the
+    /// whole body). Frames tile `text` exactly.
+    var chunks: [Chunk] = []
 }
 
 /// Everything a cell needs for one row, cached per row id.
@@ -80,6 +91,8 @@ struct RowRender {
     let layout: RowLayout
     let footerTitle: String?
     let isLong: Bool
+    /// Pre-sliced bodies for `layout.chunks` (empty when not segmented).
+    let segments: [NSAttributedString]
 }
 
 enum TranscriptMetrics {
@@ -104,6 +117,8 @@ enum TranscriptMetrics {
     static let collapseLines = 20
     static let previewChars = 800
     static let previewLines = 12
+    /// Context-menu previews show at most this much of the body.
+    static let previewMaxTextHeight: CGFloat = 600
 }
 
 enum TranscriptRenderer {
@@ -151,7 +166,35 @@ enum TranscriptRenderer {
             return MarkdownRenderer.plain("⚠︎ " + item.text, font: style.bodyFont, color: style.text)
         case .queued, .offline:
             return MarkdownRenderer.plain(item.text, font: style.bodyFont, color: style.text)
+        case .qa:
+            return qaBody(item, style: style)
         }
+    }
+
+    /// Q&A card body: "Q: …" in the secondary color, "A: …" in the primary
+    /// color, semibold; "Question declined" when cancelled.
+    static func qaBody(_ item: TranscriptItem, style: TranscriptStyle) -> NSAttributedString {
+        guard let qa = item.qa else {
+            return MarkdownRenderer.plain(item.text, font: style.bodyFont, color: style.text)
+        }
+        let questionFont = UIFont.systemFont(ofSize: max(11, style.bodyFont.pointSize * 0.9))
+        let answerFont = UIFont.systemFont(ofSize: style.bodyFont.pointSize, weight: .semibold)
+        if qa.cancelled || qa.items.isEmpty {
+            return NSAttributedString(string: qa.cancelled ? "Question declined" : "Question answered",
+                                      attributes: [.font: questionFont, .foregroundColor: style.secondaryText])
+        }
+        let out = NSMutableAttributedString()
+        for (index, entry) in qa.items.enumerated() {
+            if index > 0 {
+                out.append(NSAttributedString(string: "\n\n", attributes: [.font: questionFont]))
+            }
+            let question = entry.question.hasVisibleCharacters ? entry.question : "Question"
+            out.append(NSAttributedString(string: "Q: " + question + "\n",
+                                          attributes: [.font: questionFont, .foregroundColor: style.secondaryText]))
+            out.append(NSAttributedString(string: "A: " + entry.answer,
+                                          attributes: [.font: answerFont, .foregroundColor: style.text]))
+        }
+        return out
     }
 
     static func measure(_ string: NSAttributedString, maxWidth: CGFloat) -> CGSize {
@@ -160,6 +203,36 @@ enum TranscriptRenderer {
                                        options: [.usesLineFragmentOrigin, .usesFontLeading],
                                        context: nil)
         return CGSize(width: min(maxWidth, ceil(rect.width)), height: ceil(rect.height))
+    }
+
+    /// Measure a body; bodies taller than `TextChunker.threshold` are also
+    /// segmented, and the returned size is then the exact stack of the
+    /// segments' own measurements (what the cell draws).
+    static func measureBlock(_ body: NSAttributedString, maxWidth: CGFloat) -> (size: CGSize, chunks: [TextChunker.Chunk]) {
+        let size = measure(body, maxWidth: maxWidth)
+        guard size.height > TextChunker.threshold else { return (size, []) }
+        let chunks = TextChunker.chunks(body, width: maxWidth)
+        guard chunks.count > 1 else { return (size, []) }
+        var height: CGFloat = 0
+        var width: CGFloat = 0
+        for chunk in chunks {
+            height += chunk.size.height
+            width = max(width, chunk.size.width)
+        }
+        return (CGSize(width: min(maxWidth, width), height: height), chunks)
+    }
+
+    /// Stack segment frames top-down inside the text rect.
+    static func place(_ chunks: [TextChunker.Chunk], in text: CGRect) -> [RowLayout.Chunk] {
+        var out: [RowLayout.Chunk] = []
+        out.reserveCapacity(chunks.count)
+        var y = text.minY
+        for chunk in chunks {
+            out.append(RowLayout.Chunk(range: chunk.drawRange,
+                                       frame: CGRect(x: text.minX, y: y, width: text.width, height: chunk.size.height)))
+            y += chunk.size.height
+        }
+        return out
     }
 
     static func footerTitle(for item: TranscriptItem, expanded: Bool) -> String {
@@ -176,13 +249,14 @@ enum TranscriptRenderer {
         case .user:
             let maxBubble = max(60, width - 2 * M.hPad - M.userLeadingMin)
             let maxText = max(20, maxBubble - 2 * M.bubbleHPad)
-            let size = measure(body, maxWidth: maxText)
+            let (size, chunks) = measureBlock(body, maxWidth: maxText)
             let bubbleSize = CGSize(width: size.width + 2 * M.bubbleHPad, height: size.height + 2 * M.bubbleVPad)
             l.bubble = CGRect(x: width - M.hPad - bubbleSize.width, y: M.vPad,
                               width: bubbleSize.width, height: bubbleSize.height)
             l.text = CGRect(x: l.bubble.minX + M.bubbleHPad, y: l.bubble.minY + M.bubbleVPad,
                             width: size.width, height: size.height)
             l.drawWidth = maxText
+            l.chunks = place(chunks, in: l.text)
             var bottom = l.bubble.maxY
             if isLongUserText(item) {
                 let title = footerTitle(for: item, expanded: expanded)
@@ -195,19 +269,21 @@ enum TranscriptRenderer {
             l.height = bottom + M.vPad
         case .assistant:
             let maxText = max(20, width - 2 * M.hPad - M.assistantLeading - M.assistantTrailingMin)
-            let size = measure(body, maxWidth: maxText)
+            let (size, chunks) = measureBlock(body, maxWidth: maxText)
             l.text = CGRect(x: M.hPad + M.assistantLeading, y: M.vPad, width: size.width, height: size.height)
             l.drawWidth = maxText
+            l.chunks = place(chunks, in: l.text)
             l.height = size.height + 2 * M.vPad
         case .error:
             let maxBubble = max(60, width - 2 * M.hPad - M.assistantTrailingMin)
             let maxText = max(20, maxBubble - 2 * M.errorPad)
-            let size = measure(body, maxWidth: maxText)
+            let (size, chunks) = measureBlock(body, maxWidth: maxText)
             l.bubble = CGRect(x: M.hPad, y: M.vPad,
                               width: size.width + 2 * M.errorPad, height: size.height + 2 * M.errorPad)
             l.text = CGRect(x: l.bubble.minX + M.errorPad, y: l.bubble.minY + M.errorPad,
                             width: size.width, height: size.height)
             l.drawWidth = maxText
+            l.chunks = place(chunks, in: l.text)
             l.height = l.bubble.maxY + M.vPad
         case .queued, .offline:
             let label = item.statusText ?? ""
@@ -217,13 +293,34 @@ enum TranscriptRenderer {
                               width: headerWidth, height: M.headerHeight)
             let maxBubble = max(60, width - 2 * M.hPad - M.userLeadingMin)
             let maxText = max(20, maxBubble - 2 * M.bubbleHPad)
-            let size = measure(body, maxWidth: maxText)
+            let (size, chunks) = measureBlock(body, maxWidth: maxText)
             let bubbleSize = CGSize(width: size.width + 2 * M.bubbleHPad, height: size.height + 2 * M.bubbleVPad)
             l.bubble = CGRect(x: width - M.hPad - bubbleSize.width, y: l.header.maxY + M.headerGap,
                               width: bubbleSize.width, height: bubbleSize.height)
             l.text = CGRect(x: l.bubble.minX + M.bubbleHPad, y: l.bubble.minY + M.bubbleVPad,
                             width: size.width, height: size.height)
             l.drawWidth = maxText
+            l.chunks = place(chunks, in: l.text)
+            l.height = l.bubble.maxY + M.vPad
+        case .qa:
+            // Compact left-aligned card: icon + "Answered"/"Declined" header
+            // inside the card, then the Q/A lines.
+            let maxBubble = max(60, width - 2 * M.hPad - M.assistantTrailingMin)
+            let maxText = max(20, maxBubble - 2 * M.bubbleHPad)
+            let (size, chunks) = measureBlock(body, maxWidth: maxText)
+            let label = item.statusText ?? ""
+            let labelWidth = ceil((label as NSString).size(withAttributes: [.font: style.headerFont]).width)
+            let headerWidth = min(maxText, M.headerIcon + 5 + labelWidth)
+            let contentWidth = max(size.width, headerWidth)
+            l.bubble = CGRect(x: M.hPad, y: M.vPad,
+                              width: contentWidth + 2 * M.bubbleHPad,
+                              height: M.bubbleVPad + M.headerHeight + M.headerGap + size.height + M.bubbleVPad)
+            l.header = CGRect(x: l.bubble.minX + M.bubbleHPad, y: l.bubble.minY + M.bubbleVPad,
+                              width: headerWidth, height: M.headerHeight)
+            l.text = CGRect(x: l.header.minX, y: l.header.maxY + M.headerGap,
+                            width: size.width, height: size.height)
+            l.drawWidth = maxText
+            l.chunks = place(chunks, in: l.text)
             l.height = l.bubble.maxY + M.vPad
         }
         return l
@@ -240,11 +337,15 @@ enum TranscriptRenderer {
             cache.store(body, for: job.renderKey)
         }
         let isLong = isLongUserText(job.item)
+        let rowLayout = layout(for: job.item, body: body, width: width, expanded: job.expanded, style: style)
+        // Slice segments here (off-main) so the cell only assigns them.
+        let segments = rowLayout.chunks.map { body.attributedSubstring(from: $0.range) }
         return RowRender(renderKey: job.renderKey,
                          body: body,
-                         layout: layout(for: job.item, body: body, width: width, expanded: job.expanded, style: style),
+                         layout: rowLayout,
                          footerTitle: isLong ? footerTitle(for: job.item, expanded: job.expanded) : nil,
-                         isLong: isLong)
+                         isLong: isLong,
+                         segments: segments)
     }
 }
 

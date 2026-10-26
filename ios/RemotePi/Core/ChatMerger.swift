@@ -29,6 +29,12 @@ enum ChatMerger {
         if let a = local.timestamp, let b = incoming.timestamp, abs(a - b) > heuristicWindowMs {
             return false
         }
+        // Q&A rows (contract §9): the live copy (no entry id) and the server
+        // copy carry the same `qa` payload; their text may be empty.
+        if local.qa != nil || incoming.qa != nil {
+            guard let a = local.qa, let b = incoming.qa else { return false }
+            return a == b
+        }
         let ln = TextNormalizer.normalize(local.text)
         let rn = TextNormalizer.normalize(incoming.text)
         guard !ln.isEmpty, !rn.isEmpty else { return false }
@@ -68,6 +74,7 @@ enum ChatMerger {
         if r.model == nil { r.model = local.model }
         if !r.text.hasVisibleCharacters && local.text.hasVisibleCharacters { r.text = local.text }
         if r.toolCalls.isEmpty { r.toolCalls = local.toolCalls }
+        if r.qa == nil { r.qa = local.qa }
         return r
     }
 

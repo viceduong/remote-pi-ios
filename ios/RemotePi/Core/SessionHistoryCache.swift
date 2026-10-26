@@ -49,6 +49,7 @@ actor SessionHistoryCache {
             h.combine(m.entryId)
             h.combine(m.text.utf8.count)
             h.combine(m.isError)
+            h.combine(m.qa != nil)
         }
         return h.finalize()
     }

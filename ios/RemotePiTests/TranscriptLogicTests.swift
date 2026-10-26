@@ -128,7 +128,7 @@ final class TranscriptLogicTests: XCTestCase {
         XCTAssertTrue(state.isBusy, "a reconnect snapshot must not erase a fresh send")
         state.apply(.status(busy: true, owner: "bridge", v2: true, isSnapshot: false), now: t0.addingTimeInterval(2))
         XCTAssertEqual(state.workingText, "Working…")
-        state.apply(.activity(detail: "Writing…"), now: t0.addingTimeInterval(3))
+        state.apply(.activity(AgentActivity(kind: .writing)), now: t0.addingTimeInterval(3))
         XCTAssertEqual(state.workingText, "Writing…")
         state.apply(.status(busy: false, owner: "bridge", v2: true, isSnapshot: false), now: t0.addingTimeInterval(4))
         XCTAssertFalse(state.isBusy)

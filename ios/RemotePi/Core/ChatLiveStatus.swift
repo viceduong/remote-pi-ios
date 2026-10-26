@@ -15,6 +15,11 @@ final class ChatLiveStatus: ObservableObject {
     @Published private(set) var hasUsage = false
     /// Contract v2 `agent_status.owner == "tui"` (host terminal owns it).
     @Published private(set) var hostOwned = false
+    /// Kind of the displayed activity (banner icon); nil = spinner only.
+    @Published private(set) var activityKind: AgentActivity.Kind?
+    /// Local time the displayed activity started (elapsed counter origin).
+    /// Changes only on kind/tool transitions — not every second.
+    @Published private(set) var activitySince: Date?
 
     /// Latest cumulative provider usage. Deliberately NOT published — nothing
     /// renders the per-token value, only its presence (`hasUsage`).
@@ -56,5 +61,8 @@ final class ChatLiveStatus: ObservableObject {
         if workingText != text { workingText = text }
         let owned = state.owner == "tui"
         if hostOwned != owned { hostOwned = owned }
+        let kind = state.displayActivity?.kind
+        if activityKind != kind { activityKind = kind }
+        if activitySince != state.activitySince { activitySince = state.activitySince }
     }
 }

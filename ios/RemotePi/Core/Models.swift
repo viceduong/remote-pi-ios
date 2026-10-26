@@ -47,6 +47,188 @@ struct SessionSummary: Codable, Identifiable, Hashable {
     let writing: Bool?
     /// Working directory of the agent.
     let workdir: String?
+    /// Contract §7: what an attached transport is doing right now. Decoded
+    /// leniently — a malformed value is nil, never a failed list.
+    let activity: Lenient<AgentActivity>?
+
+    /// The decoded activity (nil when absent, null or malformed).
+    var currentActivity: AgentActivity? { activity?.value }
+}
+
+/// Decodes `T` leniently: a malformed value becomes `value == nil` instead of
+/// failing the enclosing payload (use as `Lenient<T>?` for optional keys).
+struct Lenient<T: Decodable>: Decodable {
+    let value: T?
+
+    init(_ value: T?) {
+        self.value = value
+    }
+
+    init(from decoder: Decoder) throws {
+        value = try? T(from: decoder)
+    }
+}
+
+extension Lenient: Encodable where T: Encodable {
+    func encode(to encoder: Encoder) throws {
+        try value.encode(to: encoder)
+    }
+}
+
+extension Lenient: Equatable where T: Equatable {}
+extension Lenient: Hashable where T: Hashable {}
+
+/// Contract §7 `agent_status.activity` / session-summary `activity`: what
+/// the agent is doing right now.
+struct AgentActivity: Codable, Hashable {
+    enum Kind: String, Codable, Hashable {
+        case waiting, thinking, writing, toolcall, tool, compacting, retrying, question
+    }
+
+    var kind: Kind
+    /// ms epoch (server clock) when THIS kind/tool started.
+    var since: Int?
+    var tool: String?
+    var toolCount: Int?
+    var reason: String?
+    var percent: Int?
+    var attempt: Int?
+    var maxAttempts: Int?
+    var delayMs: Int?
+
+    init(kind: Kind, since: Int? = nil, tool: String? = nil, toolCount: Int? = nil,
+         reason: String? = nil, percent: Int? = nil, attempt: Int? = nil,
+         maxAttempts: Int? = nil, delayMs: Int? = nil) {
+        self.kind = kind
+        self.since = since
+        self.tool = tool.flatMap { $0.isEmpty ? nil : $0 }
+        self.toolCount = toolCount
+        self.reason = reason
+        self.percent = percent
+        self.attempt = attempt
+        self.maxAttempts = maxAttempts
+        self.delayMs = delayMs
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind, since, tool, toolCount, reason, percent, attempt, maxAttempts, delayMs
+    }
+
+    /// Only `kind` is required; an unknown (newer) kind reads as "waiting".
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = try c.decode(String.self, forKey: .kind)
+        self.init(kind: Kind(rawValue: raw) ?? .waiting,
+                  since: Self.flexibleInt(c, .since),
+                  tool: try? c.decodeIfPresent(String.self, forKey: .tool),
+                  toolCount: Self.flexibleInt(c, .toolCount),
+                  reason: try? c.decodeIfPresent(String.self, forKey: .reason),
+                  percent: Self.flexibleInt(c, .percent),
+                  attempt: Self.flexibleInt(c, .attempt),
+                  maxAttempts: Self.flexibleInt(c, .maxAttempts),
+                  delayMs: Self.flexibleInt(c, .delayMs))
+    }
+
+    /// Build from an untyped SSE `agent_status.activity` object.
+    init?(json: [String: Any]) {
+        guard let raw = json["kind"] as? String else { return nil }
+        func int(_ key: String) -> Int? { (json[key] as? NSNumber)?.intValue }
+        self.init(kind: Kind(rawValue: raw) ?? .waiting,
+                  since: int("since"),
+                  tool: json["tool"] as? String,
+                  toolCount: int("toolCount"),
+                  reason: json["reason"] as? String,
+                  percent: int("percent"),
+                  attempt: int("attempt"),
+                  maxAttempts: int("maxAttempts"),
+                  delayMs: int("delayMs"))
+    }
+
+    private static func flexibleInt(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) -> Int? {
+        if let v = try? c.decodeIfPresent(Int.self, forKey: key) { return v }
+        if let d = try? c.decodeIfPresent(Double.self, forKey: key), d.isFinite { return Int(d) }
+        return nil
+    }
+
+    /// Status label (banner + session list).
+    var label: String {
+        switch kind {
+        case .waiting:
+            return "Working…"
+        case .thinking:
+            return "Thinking…"
+        case .writing:
+            return "Writing…"
+        case .toolcall:
+            return "Preparing \(tool ?? "tool")…"
+        case .tool:
+            var text = "Running \(tool ?? "tools")"
+            if let count = toolCount, count > 1 { text += " +\(count - 1)" }
+            return text
+        case .compacting:
+            if let percent { return "Compacting context… \(min(max(percent, 0), 100))%" }
+            return "Compacting context…"
+        case .retrying:
+            if let attempt, let maxAttempts, maxAttempts > 0 { return "Retrying (\(attempt)/\(maxAttempts))…" }
+            return "Retrying…"
+        case .question:
+            return "Waiting for your answer"
+        }
+    }
+
+    /// SF Symbol (all available in SF Symbols 2, i.e. iOS 14+).
+    var symbolName: String {
+        switch kind {
+        case .waiting: return "hourglass"
+        case .thinking: return "brain.head.profile"
+        case .writing: return "pencil"
+        case .toolcall: return "hammer"
+        case .tool: return "wrench.and.screwdriver"
+        case .compacting: return "archivebox"
+        case .retrying: return "arrow.triangle.2.circlepath"
+        case .question: return "questionmark.bubble"
+        }
+    }
+
+    /// Identity of "what" is happening — the elapsed clock restarts only when
+    /// this changes (the server's `since` has the same semantics).
+    var phaseKey: String { kind.rawValue + "|" + (tool ?? "") }
+}
+
+/// Contract §9: the answered (or declined) `ask_user_question` result.
+struct QAInfo: Codable, Equatable {
+    struct Item: Codable, Equatable {
+        let question: String
+        let answer: String
+    }
+
+    let cancelled: Bool
+    let items: [Item]
+
+    init(cancelled: Bool, items: [Item]) {
+        self.cancelled = cancelled
+        self.items = items
+    }
+
+    /// Build from an untyped SSE/file_update `qa` object.
+    init?(json: Any?) {
+        guard let dict = json as? [String: Any] else { return nil }
+        let rawItems = dict["items"] as? [[String: Any]] ?? []
+        self.cancelled = dict["cancelled"] as? Bool ?? false
+        self.items = rawItems.map {
+            Item(question: $0["question"] as? String ?? "", answer: $0["answer"] as? String ?? "")
+        }
+    }
+
+    /// Plain copy text (context menu Copy / Select Text).
+    var transcriptText: String {
+        if cancelled { return "Question declined" }
+        if items.isEmpty { return "Question answered" }
+        return items.map { item in
+            let question = item.question.hasVisibleCharacters ? item.question : "Question"
+            return "Q: \(question)\nA: \(item.answer)"
+        }.joined(separator: "\n\n")
+    }
 }
 
 /// Server-owned prompt queue item (durable outbox).
@@ -233,6 +415,8 @@ struct WireMessage: Decodable {
     let errorMessage: String?
     /// Contract v2 §3: echo of the client idempotency key on user rows.
     let clientMessageId: String?
+    /// Contract §9: Q&A payload on the `ask_user_question` result row.
+    let qa: Lenient<QAInfo>?
 
     func toChatMessage() -> ChatMessage {
         let rawRole = self.role
@@ -251,9 +435,11 @@ struct WireMessage: Decodable {
         if let toolName, !toolName.isEmpty { role = .tool }
         let body = text ?? ""
         if role == .tool {
-            return ChatMessage(entryId: id, role: .tool, text: body, thinking: nil, toolCalls: [],
-                               isError: isError, toolName: toolName, isSystemNote: false,
-                               model: nil, errorMessage: nil, timestamp: timestamp)
+            var message = ChatMessage(entryId: id, role: .tool, text: body, thinking: nil, toolCalls: [],
+                                      isError: isError, toolName: toolName, isSystemNote: false,
+                                      model: nil, errorMessage: nil, timestamp: timestamp)
+            message.qa = qa?.value
+            return message
         }
         return ChatMessage(
             entryId: id,
@@ -348,11 +534,15 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     var model: String?
     var errorMessage: String?
     var timestamp: Int?
+    /// Contract §9: set on the `ask_user_question` result row — the one
+    /// visible tool row (rendered as a compact Q&A card).
+    var qa: QAInfo?
 
     init(id: String? = nil, entryId: String? = nil, clientMessageId: String? = nil,
          role: MessageRole, text: String, thinking: String?, toolCalls: [ToolCall],
          isError: Bool, toolName: String?,
-         isSystemNote: Bool, model: String?, errorMessage: String?, timestamp: Int?) {
+         isSystemNote: Bool, model: String?, errorMessage: String?, timestamp: Int?,
+         qa: QAInfo? = nil) {
         self.id = id ?? entryId.map { "entry:\($0)" } ?? "local:\(UUID().uuidString)"
         self.entryId = entryId
         self.clientMessageId = clientMessageId
@@ -366,12 +556,13 @@ struct ChatMessage: Identifiable, Equatable, Codable {
         self.model = model
         self.errorMessage = errorMessage
         self.timestamp = timestamp
+        self.qa = qa
     }
 
     enum CodingKeys: String, CodingKey {
         case id, entryId, clientMessageId, role, text, thinking, toolCalls
         case isError, toolName, isSystemNote, model
-        case errorMessage, timestamp
+        case errorMessage, timestamp, qa
     }
 
     init(from decoder: Decoder) throws {
@@ -391,6 +582,7 @@ struct ChatMessage: Identifiable, Equatable, Codable {
         model = try c.decodeIfPresent(String.self, forKey: .model)
         errorMessage = try c.decodeIfPresent(String.self, forKey: .errorMessage)
         timestamp = try c.decodeIfPresent(Int.self, forKey: .timestamp)
+        qa = try? c.decodeIfPresent(QAInfo.self, forKey: .qa)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -408,6 +600,7 @@ struct ChatMessage: Identifiable, Equatable, Codable {
         try c.encodeIfPresent(model, forKey: .model)
         try c.encodeIfPresent(errorMessage, forKey: .errorMessage)
         try c.encodeIfPresent(timestamp, forKey: .timestamp)
+        try c.encodeIfPresent(qa, forKey: .qa)
     }
 
     /// Retain at most one consecutive blank line, trim leading/trailing
@@ -477,7 +670,8 @@ struct ChatMessage: Identifiable, Equatable, Codable {
                 isSystemNote: role == .user && ((json["system"] as? Bool) == true || isBgNotification(text)),
                 model: json["model"] as? String,
                 errorMessage: json["errorMessage"] as? String,
-                timestamp: timestamp
+                timestamp: timestamp,
+                qa: role == .tool ? QAInfo(json: json["qa"]) : nil
             )
         }
         var text = ""
@@ -551,7 +745,8 @@ struct ChatMessage: Identifiable, Equatable, Codable {
             isSystemNote: role == .user && (isCustom || (json["system"] as? Bool) == true || Self.isBgNotification(text)),
             model: model,
             errorMessage: json["errorMessage"] as? String,
-            timestamp: timestamp
+            timestamp: timestamp,
+            qa: role == .tool ? QAInfo(json: json["qa"]) : nil
         )
     }
 

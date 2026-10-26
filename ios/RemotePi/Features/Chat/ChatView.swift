@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Combine
 
 /// Chat conversation screen: SwiftUI chrome around the UIKit transcript.
 ///
@@ -175,19 +176,7 @@ struct ChatBottomBar: View {
                 QuestionCardView(viewModel: viewModel, question: question)
             }
             if let work = status.workingText {
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(theme.accent)
-                    Text(work)
-                        .font(.caption)
-                        .foregroundColor(theme.secondaryText)
-                    Spacer()
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(theme.accent.opacity(0.10))
-                .accessibilityElement(children: .combine)
+                WorkingBanner(text: work, kind: status.activityKind, since: status.activitySince)
             }
             if let note = viewModel.queuedNote {
                 HStack(spacing: 6) {
@@ -301,110 +290,316 @@ struct HostOwnershipBanner: View {
     }
 }
 
-/// Ask-user-question card: renders the pending questionnaire above the
-/// composer (single/multi select, option descriptions, optional typed answer).
+/// Working/activity banner (contract §7). Re-renders only on label / kind /
+/// transition changes; the elapsed counter ticks inside its own
+/// `TimelineView`, so nothing else in the bar re-renders every second.
+struct WorkingBanner: View {
+    let text: String
+    let kind: AgentActivity.Kind?
+    let since: Date?
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if let symbol = symbolName {
+                Image(systemName: symbol)
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(theme.accent)
+                    .frame(width: 18)
+                    .accessibilityHidden(true)
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(theme.accent)
+            }
+            Text(text)
+                .font(.caption)
+                .foregroundColor(theme.secondaryText)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if let since {
+                ElapsedLabel(since: since)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(theme.accent.opacity(0.10))
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Spinner for plain "working"/optimistic states, a symbol otherwise.
+    private var symbolName: String? {
+        guard let kind, kind != .waiting else { return nil }
+        return AgentActivity(kind: kind).symbolName
+    }
+}
+
+/// "· 12s" / "· 1m 05s" since the activity started (hidden below 3s).
+struct ElapsedLabel: View {
+    let since: Date
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        TimelineView(.periodic(from: since, by: 1)) { context in
+            Text(ElapsedFormatter.label(context.date.timeIntervalSince(since)) ?? "")
+                .font(.caption.monospacedDigit())
+                .foregroundColor(theme.secondaryText)
+                .lineLimit(1)
+                .fixedSize()
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// Ask-user-question card (contract §8): renders the pending questionnaire
+/// above the composer — single/multi select, option descriptions and
+/// previews, optional typed answer. The questions area is sized to its
+/// content up to ~60% of the space above the keyboard and scrolls beyond
+/// that; Submit / "Chat about this" stay pinned at the card bottom.
 struct QuestionCardView: View {
     @ObservedObject var viewModel: ChatViewModel
     let question: AgentQuestion
     @Environment(\.theme) private var theme
+    @State private var contentHeight: CGFloat = 0
+    @State private var keyboardHeight: CGFloat = 0
+
+    /// Header + footer + paddings around the questions area.
+    private static let chromeHeight: CGFloat = 104
+
+    private var isComplete: Bool {
+        ChatViewModel.isComplete(question, selections: viewModel.questionSelections,
+                                 text: viewModel.questionText)
+    }
+
+    private var scrollCap: CGFloat {
+        let available = max(0, UIScreen.main.bounds.height - keyboardHeight)
+        return max(96, available * 0.6 - Self.chromeHeight)
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: "questionmark.bubble")
-                Text("Agent question")
-                    .font(.caption.weight(.semibold))
-                Spacer()
-                Button {
-                    viewModel.cancelQuestionAction()
-                } label: {
-                    Text("Cancel").font(.caption)
-                }
-            }
-            .foregroundColor(theme.accent)
-
+        VStack(alignment: .leading, spacing: 8) {
+            header
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    ForEach(question.items) { item in
-                        VStack(alignment: .leading, spacing: 6) {
-                            if !item.header.isEmpty {
-                                Text(item.header.uppercased())
-                                    .font(.caption2.weight(.bold))
-                                    .foregroundColor(theme.accent)
-                            }
-                            Text(item.question)
-                                .font(.subheadline)
-                                .foregroundColor(theme.terminalText)
-                            ForEach(item.options) { option in
-                                optionRow(item: item, option: option)
-                            }
-                            TextField(item.multiSelect ? "Add a note (optional)…" : "Type something…",
-                                      text: Binding(
-                                        get: { viewModel.questionText[item.index] ?? "" },
-                                        set: { viewModel.questionText[item.index] = $0 }))
-                                .font(.caption)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .background(theme.secondaryBackground)
-                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        }
+                VStack(alignment: .leading, spacing: 16) {
+                    ForEach(Array(question.items.enumerated()), id: \.element.id) { position, item in
+                        section(item, position: position)
                     }
                 }
+                .padding(.vertical, 2)
+                .background(GeometryReader { proxy in
+                    Color.clear.preference(key: QuestionCardHeightKey.self, value: proxy.size.height)
+                })
             }
-            .frame(maxHeight: 260)
+            .frame(height: min(max(contentHeight, 1), scrollCap))
+            .onPreferenceChange(QuestionCardHeightKey.self) { contentHeight = $0 }
+            footer
+        }
+        .padding(12)
+        .background(theme.secondaryBackground.opacity(0.6))
+        .overlay(Rectangle().frame(height: 1).foregroundColor(theme.accent.opacity(0.25)),
+                 alignment: .top)
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
+            guard let frame = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue else {
+                return
+            }
+            keyboardHeight = max(0, UIScreen.main.bounds.height - frame.minY)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            keyboardHeight = 0
+        }
+        .accessibilityElement(children: .contain)
+    }
 
+    private var header: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "questionmark.bubble")
+                .accessibilityHidden(true)
+            Text(question.items.count > 1 ? "Agent question · \(question.items.count) questions" : "Agent question")
+                .font(.caption.weight(.semibold))
+            Spacer()
             Button {
+                viewModel.cancelQuestionAction()
+            } label: {
+                Text("Cancel").font(.caption)
+            }
+            .accessibilityLabel("Decline the question")
+        }
+        .foregroundColor(theme.accent)
+    }
+
+    private func section(_ item: AgentQuestion.Item, position: Int) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if question.items.count > 1 || !item.header.isEmpty {
+                HStack(spacing: 6) {
+                    if question.items.count > 1 {
+                        Text("QUESTION \(position + 1) OF \(question.items.count)")
+                            .font(.caption2.weight(.bold))
+                            .foregroundColor(theme.secondaryText)
+                    }
+                    if !item.header.isEmpty {
+                        Text(item.header.uppercased())
+                            .font(.caption2.weight(.bold))
+                            .foregroundColor(theme.accent)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+            }
+            Text(item.question)
+                .font(.subheadline)
+                .foregroundColor(theme.terminalText)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(item.options) { option in
+                optionRow(item: item, option: option)
+            }
+            TextField(placeholder(for: item), text: typedBinding(for: item))
+                .font(.caption)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(theme.secondaryBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .accessibilityLabel(item.multiSelect ? "Note for question \(position + 1)"
+                                                     : "Typed answer for question \(position + 1)")
+        }
+    }
+
+    private func placeholder(for item: AgentQuestion.Item) -> String {
+        if item.multiSelect { return "Add a note (optional)…" }
+        return item.options.isEmpty ? "Type your answer…" : "Or type your own answer…"
+    }
+
+    /// Single-select: typing replaces the picked option (sent as `custom`);
+    /// multi-select: typed text is a note on the selection.
+    private func typedBinding(for item: AgentQuestion.Item) -> Binding<String> {
+        let vm = viewModel
+        return Binding(
+            get: { vm.questionText[item.index] ?? "" },
+            set: { newValue in
+                vm.questionText[item.index] = newValue
+                if !item.multiSelect, newValue.hasVisibleCharacters,
+                   !(vm.questionSelections[item.index] ?? []).isEmpty {
+                    vm.questionSelections[item.index] = []
+                }
+            })
+    }
+
+    private var footer: some View {
+        HStack(spacing: 10) {
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                viewModel.chatAboutQuestionAction()
+            } label: {
+                Text("Chat about this")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(theme.secondaryText)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background(theme.secondaryBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            .accessibilityHint("Skips the questions so you can reply in the chat")
+            Button {
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
                 viewModel.submitQuestionAction()
             } label: {
                 Text("Submit")
                     .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
-                    .background(theme.accent.opacity(0.18))
+                    .background(theme.accent.opacity(isComplete ? 0.18 : 0.06))
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
+            .disabled(!isComplete)
+            .accessibilityLabel("Submit answers")
+            .accessibilityHint(isComplete ? "Sends your answers to the agent" : "Answer every question first")
         }
-        .padding(12)
-        .background(theme.secondaryBackground.opacity(0.6))
-        .overlay(Rectangle().frame(height: 1).foregroundColor(theme.accent.opacity(0.25)),
-                 alignment: .top)
     }
 
     private func optionRow(item: AgentQuestion.Item, option: AgentQuestion.Option) -> some View {
         let isSelected = (viewModel.questionSelections[item.index] ?? []).contains(option.label)
-        return Button {
-            var current = viewModel.questionSelections[item.index] ?? []
-            if item.multiSelect {
-                if current.contains(option.label) { current.remove(option.label) }
-                else { current.insert(option.label) }
-            } else {
-                current = [option.label]
-                viewModel.questionText[item.index] = ""
-            }
-            viewModel.questionSelections[item.index] = current
-        } label: {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: isSelected
-                      ? (item.multiSelect ? "checkmark.square.fill" : "largecircle.fill.circle")
-                      : (item.multiSelect ? "square" : "circle"))
-                    .foregroundColor(isSelected ? theme.accent : theme.secondaryText)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(option.label)
-                        .font(.caption.weight(.semibold))
-                        .foregroundColor(theme.terminalText)
-                    if !option.description.isEmpty {
-                        Text(option.description)
-                            .font(.caption2)
-                            .foregroundColor(theme.secondaryText)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
+        return VStack(alignment: .leading, spacing: 6) {
+            Button {
+                var current = viewModel.questionSelections[item.index] ?? []
+                if item.multiSelect {
+                    if current.contains(option.label) { current.remove(option.label) }
+                    else { current.insert(option.label) }
+                } else {
+                    current = [option.label]
+                    viewModel.questionText[item.index] = ""
                 }
-                Spacer(minLength: 0)
+                viewModel.questionSelections[item.index] = current
+            } label: {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: isSelected
+                          ? (item.multiSelect ? "checkmark.square.fill" : "largecircle.fill.circle")
+                          : (item.multiSelect ? "square" : "circle"))
+                        .foregroundColor(isSelected ? theme.accent : theme.secondaryText)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(option.label)
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(theme.terminalText)
+                        if !option.description.isEmpty {
+                            Text(option.description)
+                                .font(.caption2)
+                                .foregroundColor(theme.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(option.description.isEmpty ? option.label : "\(option.label). \(option.description)")
+            .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+            .accessibilityHint(item.multiSelect ? "Toggles this option" : "Selects this option")
+            if let preview = option.preview {
+                QuestionPreviewBlock(text: preview)
+                    .padding(.leading, 26)
+            }
         }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+/// Option `preview` (contract §8): monospaced, horizontally scrollable for
+/// wide ASCII art, at most `maxHeight` tall with its own vertical scroll.
+struct QuestionPreviewBlock: View {
+    let text: String
+    @Environment(\.theme) private var theme
+
+    static let maxHeight: CGFloat = 180
+
+    /// Natural height of the text in the caption2 monospaced font.
+    private var naturalHeight: CGFloat {
+        let size = UIFont.preferredFont(forTextStyle: .caption2).pointSize
+        let lineHeight = ceil(UIFont.monospacedSystemFont(ofSize: size, weight: .regular).lineHeight) + 1
+        let lines = text.reduce(into: 1) { count, ch in if ch == "\n" { count += 1 } }
+        return CGFloat(lines) * lineHeight + 16
+    }
+
+    var body: some View {
+        ScrollView([.horizontal, .vertical], showsIndicators: true) {
+            Text(text)
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundColor(theme.text)
+                .fixedSize(horizontal: true, vertical: true)
+                .padding(8)
+        }
+        .frame(height: min(Self.maxHeight, naturalHeight))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(theme.secondaryBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Preview")
+        .accessibilityValue(text)
+    }
+}
+
+private struct QuestionCardHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
