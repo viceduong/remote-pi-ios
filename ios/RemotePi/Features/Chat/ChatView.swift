@@ -605,15 +605,13 @@ struct QuestionPreviewBlock: View {
     /// just its code (no ``` fence lines).
     static func displayText(_ raw: String) -> String {
         var lines = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            .components(separatedBy: "
-")
+            .components(separatedBy: "\n")
         guard lines.count >= 2,
               lines.first?.trimmingCharacters(in: .whitespaces).hasPrefix("```") == true,
               lines.last?.trimmingCharacters(in: .whitespaces) == "```" else { return raw }
         lines.removeFirst()
         lines.removeLast()
-        return lines.joined(separator: "
-")
+        return lines.joined(separator: "\n")
     }
 
     var body: some View {
