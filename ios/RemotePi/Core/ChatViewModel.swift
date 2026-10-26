@@ -313,11 +313,12 @@ final class ChatViewModel: ObservableObject {
         var chipClientIds = Set<String>()
         for chip in reconciled.chips {
             if let cid = chip.item.clientMessageId { chipClientIds.insert(cid) }
-            let queued = chip.item.status == "queued"
+            let actions = ChatViewModel.chipActions(chip)
             items.append(TranscriptItem(
                 id: chip.rowId, kind: .queued, text: chip.item.message,
                 statusText: ChatViewModel.chipStatus(chip.item),
-                cancellable: queued && chip.origin != .piNative && chip.serverId != nil,
+                cancellable: actions.cancellable,
+                canSteer: actions.steerable,
                 actionId: chip.serverId))
         }
         for o in offlinePending where !chipClientIds.contains(o.clientMessageId) {
@@ -364,6 +365,15 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    /// A chip can be cancelled / steered only when it is a still-`queued`
+    /// server item with a server queue id: pi-native rows (no id) and local
+    /// "sending" chips that have not reached the server yet are neither. Both
+    /// actions key off the same server queue id (`chip.serverId`).
+    nonisolated static func chipActions(_ chip: QueueChip) -> (cancellable: Bool, steerable: Bool) {
+        let eligible = chip.item.status == "queued" && chip.origin != .piNative && chip.serverId != nil
+        return (eligible, eligible)
+    }
+
     nonisolated private static func chipStatus(_ item: QueueItem) -> String {
         if item.status != "queued" { return "sending" }
         var parts = ["queued"]
@@ -383,12 +393,32 @@ final class ChatViewModel: ObservableObject {
     private func expireStaleLocalPending() {
         let now = ChatViewModel.nowMs
         let serverCids = Set(serverQueue.compactMap(\.clientMessageId))
+        // Delivered-but-never-echoed "running" chips: drop them (the message is
+        // on the server; a refresh surfaces the real user row).
         let isStale: (QueueItem) -> Bool = { item in
             item.status == "running"
                 && !serverCids.contains(item.clientMessageId ?? "")
                 && now - (item.queuedAt ?? now) > 90_000
         }
         if localPending.contains(where: isStale) { localPending.removeAll(where: isStale) }
+
+        // Safety net for a chip stuck in "sending": `deliver` always resolves a
+        // send within the request timeout (to running/queued/offline/error), so
+        // a "sending" chip older than that means its delivery task was lost. Re-
+        // queue it to the offline outbox — it retries idempotently (server
+        // dedupes on clientMessageId) and shows a visible "waiting for
+        // connection" state instead of an indefinite, silent "sending".
+        let stuckSending = localPending.filter {
+            $0.status == "sending" && now - ($0.queuedAt ?? now) > 60_000
+        }
+        if !stuckSending.isEmpty {
+            let stuckIds = Set(stuckSending.map(\.id))
+            localPending.removeAll { stuckIds.contains($0.id) }
+            for item in stuckSending {
+                let cid = item.clientMessageId ?? UUID().uuidString
+                spawn { [weak self] in await self?.enqueueOffline(item.message, clientMessageId: cid) }
+            }
+        }
     }
 
     /// Offline items the server already has (lost response) are delivered.
@@ -746,6 +776,48 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    /// Contract §10 "send now": promote a queued item into the running turn.
+    /// Optimistic — flip the chip to a running/"sending" state at once (same
+    /// stable row id, so it never duplicates); the user-row echo reconciles it
+    /// away exactly like a normal dispatch. On failure restore the queued chip
+    /// and surface the error.
+    func steerQueued(_ serverItemId: String) {
+        func markRunning(_ item: QueueItem) -> QueueItem {
+            QueueItem(id: item.id, clientMessageId: item.clientMessageId, message: item.message,
+                      status: "running", queuedAt: item.queuedAt)
+        }
+        if let i = serverQueue.firstIndex(where: { $0.id == serverItemId }) {
+            serverQueue[i] = markRunning(serverQueue[i])
+        }
+        if let i = localPending.firstIndex(where: { $0.id == serverItemId }) {
+            localPending[i] = markRunning(localPending[i])
+        }
+        status.apply(.optimisticSend)
+        scrollToBottomRequests.send(())
+        spawn { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.client.steerQueued(self.sessionId, itemId: serverItemId)
+                // On a live stream the echo + queue_update reconcile the chip;
+                // without one, pull server truth now.
+                if self.connectionState != .connected { await self.refreshFromServer() }
+            } catch {
+                guard !APIClient.isCancellation(error) else { return }
+                // Delivery failed (§10: 404/409/502) — the item stays queued
+                // server-side; restore the queued chip so it can be retried.
+                self.status.apply(.clearOptimistic)
+                if let i = self.localPending.firstIndex(where: { $0.id == serverItemId }) {
+                    let it = self.localPending[i]
+                    self.localPending[i] = QueueItem(id: it.id, clientMessageId: it.clientMessageId,
+                                                     message: it.message, status: "queued",
+                                                     queuedAt: it.queuedAt)
+                }
+                self.surface(error)
+                await self.loadQueue()
+            }
+        }
+    }
+
     func discardOffline(_ id: UUID) {
         offlinePending.removeAll { $0.id == id }
         let snapshot = offlinePending
@@ -1004,6 +1076,15 @@ final class ChatViewModel: ObservableObject {
         for frame in frames { handle(frame) }
         evictLiveTailIfNeeded()
     }
+
+    #if DEBUG
+    /// Test seam: feed parsed SSE frames through the real frame handler
+    /// without opening a stream (snapshot/integration tests only).
+    func ingestForTesting(_ frames: [ParsedSSEFrame]) {
+        lifecycleActive = true
+        handle(frames)
+    }
+    #endif
 
     private func handle(_ frame: ParsedSSEFrame) {
         if frame.isReset {

@@ -68,6 +68,9 @@ struct TranscriptItem: Equatable {
     var statusText: String? = nil
     /// Chips/offline rows: whether the ✕ button is shown.
     var cancellable = false
+    /// Queued chips with a server queue id: whether the "send now" (steer)
+    /// button is shown. Uses the same `actionId` (the server queue id).
+    var canSteer = false
     /// Server queue item id (chips) or offline UUID string (offline rows).
     var actionId: String? = nil
     /// Q&A rows: the structured questions/answers (`text` is the copy text).

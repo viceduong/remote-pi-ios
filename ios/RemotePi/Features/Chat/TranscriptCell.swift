@@ -76,6 +76,7 @@ final class TranscriptCell: UITableViewCell {
     private let headerIcon = UIImageView()
     private let headerLabel = UILabel()
     private let actionButton = HitExpandedButton(type: .system)
+    private let steerButton = HitExpandedButton(type: .system)
     private let footerButton = HitExpandedButton(type: .system)
 
     private var layout = RowLayout()
@@ -88,6 +89,7 @@ final class TranscriptCell: UITableViewCell {
     private var freeSegmentViews: [AttributedTextView] = []
 
     var onAction: (() -> Void)?
+    var onSteer: (() -> Void)?
     var onToggleExpand: (() -> Void)?
 
     /// Row body is drawn as stacked segments.
@@ -122,6 +124,10 @@ final class TranscriptCell: UITableViewCell {
         actionButton.addTarget(self, action: #selector(actionTapped), for: .touchUpInside)
         contentView.addSubview(actionButton)
 
+        steerButton.setImage(UIImage(systemName: "bolt.fill"), for: .normal)
+        steerButton.addTarget(self, action: #selector(steerTapped), for: .touchUpInside)
+        contentView.addSubview(steerButton)
+
         footerButton.contentHorizontalAlignment = .leading
         footerButton.addTarget(self, action: #selector(footerTapped), for: .touchUpInside)
         contentView.addSubview(footerButton)
@@ -134,6 +140,7 @@ final class TranscriptCell: UITableViewCell {
     override func prepareForReuse() {
         super.prepareForReuse()
         onAction = nil
+        onSteer = nil
         onToggleExpand = nil
         // Free segment backing stores right away (the next row may be short).
         recycleAllSegments()
@@ -208,6 +215,7 @@ final class TranscriptCell: UITableViewCell {
         headerIcon.isHidden = !hasHeader
         headerLabel.isHidden = !hasHeader
         actionButton.isHidden = !(isChip && item.cancellable)
+        steerButton.isHidden = !(item.kind == .queued && item.canSteer)
         if isChip {
             let tint = item.kind == .queued ? style.chipTint : style.secondaryText
             headerIcon.image = UIImage(systemName: item.kind == .queued ? "clock.arrow.circlepath" : "wifi.slash")
@@ -218,6 +226,9 @@ final class TranscriptCell: UITableViewCell {
             actionButton.tintColor = style.secondaryText
             actionButton.accessibilityLabel = item.kind == .queued
                 ? "Cancel queued message" : "Discard unsent message"
+            steerButton.tintColor = style.accent
+            steerButton.accessibilityLabel = "Send now"
+            steerButton.accessibilityHint = "Interrupts the agent and sends this message immediately"
         } else if item.kind == .qa {
             let tint = item.qa?.cancelled == true ? style.secondaryText : style.accent
             headerIcon.image = UIImage(systemName: "questionmark.bubble")
@@ -254,12 +265,22 @@ final class TranscriptCell: UITableViewCell {
             let m = TranscriptMetrics.self
             headerIcon.frame = CGRect(x: h.minX, y: h.midY - m.headerIcon / 2,
                                       width: m.headerIcon, height: m.headerIcon)
-            let buttonSpace = actionButton.isHidden ? 0 : 5 + m.headerButton
+            // Right-align the action buttons (✕ at the far edge, then "send
+            // now" to its left); the label fills the gap up to the leftmost one.
+            var rightEdge = h.maxX
+            if !actionButton.isHidden {
+                actionButton.frame = CGRect(x: rightEdge - m.headerButton, y: h.midY - m.headerButton / 2,
+                                            width: m.headerButton, height: m.headerButton)
+                rightEdge = actionButton.frame.minX - 5
+            }
+            if !steerButton.isHidden {
+                steerButton.frame = CGRect(x: rightEdge - m.headerButton, y: h.midY - m.headerButton / 2,
+                                           width: m.headerButton, height: m.headerButton)
+                rightEdge = steerButton.frame.minX - 5
+            }
             let labelX = headerIcon.frame.maxX + 5
             headerLabel.frame = CGRect(x: labelX, y: h.minY,
-                                       width: max(0, h.maxX - buttonSpace - labelX), height: h.height)
-            actionButton.frame = CGRect(x: h.maxX - m.headerButton, y: h.midY - m.headerButton / 2,
-                                        width: m.headerButton, height: m.headerButton)
+                                       width: max(0, rightEdge - labelX), height: h.height)
         }
         if !footerButton.isHidden {
             footerButton.frame = l.footer
@@ -379,5 +400,6 @@ final class TranscriptCell: UITableViewCell {
     var previewCornerRadius: CGFloat { max(bubbleCorner, 10) }
 
     @objc private func actionTapped() { onAction?() }
+    @objc private func steerTapped() { onSteer?() }
     @objc private func footerTapped() { onToggleExpand?() }
 }

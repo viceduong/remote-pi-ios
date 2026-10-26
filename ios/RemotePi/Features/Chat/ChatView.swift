@@ -108,6 +108,7 @@ struct ChatView: View {
             loadMore: { vm.loadMore() },
             nearBottomChanged: { vm.setViewportNearBottom($0) },
             cancelQueued: { vm.cancelQueued($0) },
+            steerQueued: { vm.steerQueued($0) },
             discardOffline: { id in
                 if let uuid = UUID(uuidString: id) { vm.discardOffline(uuid) }
             },
@@ -209,6 +210,12 @@ struct ChatBottomBar: View {
                         Text(String(format: "$%.2f", cost))
                             .font(.caption2.monospacedDigit())
                             .foregroundColor(theme.secondaryText)
+                    }
+                    if let tps = status.tokensPerSecond, tps > 0 {
+                        Text("\(tps) tok/s")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundColor(theme.secondaryText)
+                            .accessibilityLabel("\(tps) tokens per second")
                     }
                     Spacer()
                 }
@@ -380,19 +387,7 @@ struct QuestionCardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             header
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    ForEach(Array(question.items.enumerated()), id: \.element.id) { position, item in
-                        section(item, position: position)
-                    }
-                }
-                .padding(.vertical, 2)
-                .background(GeometryReader { proxy in
-                    Color.clear.preference(key: QuestionCardHeightKey.self, value: proxy.size.height)
-                })
-            }
-            .frame(height: min(max(contentHeight, 1), scrollCap))
-            .onPreferenceChange(QuestionCardHeightKey.self) { contentHeight = $0 }
+            questionsArea
             footer
         }
         .padding(12)
@@ -409,6 +404,34 @@ struct QuestionCardView: View {
             keyboardHeight = 0
         }
         .accessibilityElement(children: .contain)
+    }
+
+    /// The questions render at their NATURAL height and only become a bounded,
+    /// scrollable region once they would exceed `scrollCap`. Crucially, until
+    /// the content is measured (`contentHeight == 0`) the natural branch is
+    /// used, so on first appearance the questions are always fully laid out —
+    /// never trapped at ~1pt. (A fixed-height `ScrollView` seeded from a 0/1
+    /// `@State` + `onPreferenceChange` frequently never settles on iOS 15, so
+    /// the card would show only its header + footer with no visible content.)
+    @ViewBuilder
+    private var questionsArea: some View {
+        let questions = VStack(alignment: .leading, spacing: 16) {
+            ForEach(Array(question.items.enumerated()), id: \.element.id) { position, item in
+                section(item, position: position)
+            }
+        }
+        .padding(.vertical, 2)
+        .background(GeometryReader { proxy in
+            Color.clear.preference(key: QuestionCardHeightKey.self, value: proxy.size.height)
+        })
+        .onPreferenceChange(QuestionCardHeightKey.self) { contentHeight = $0 }
+
+        if contentHeight > scrollCap {
+            ScrollView { questions }
+                .frame(height: scrollCap)
+        } else {
+            questions
+        }
     }
 
     private var header: some View {

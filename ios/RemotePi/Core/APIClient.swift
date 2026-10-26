@@ -263,6 +263,15 @@ struct APIClient {
         try await delete("/api/sessions/\(id)/queue/\(itemId)")
     }
 
+    /// Contract §10: promote a queued item to immediate delivery, injecting it
+    /// into the running turn (`streamingBehavior:"steer"`) and bypassing the
+    /// busy gate. Throws `APIError.http` on 404 (not a queued item), 409
+    /// `session_live` (host owns the file) or 502 (delivery failed); the item
+    /// then stays queued server-side.
+    func steerQueued(_ id: String, itemId: String) async throws {
+        try await postNoResponse("/api/sessions/\(id)/queue/\(itemId)/steer")
+    }
+
     /// Full tool output for a toolCallId (skeleton mode fetch-on-expand).
     func fetchToolResult(_ id: String, toolCallId: String) async throws -> String {
         struct Wrapper: Decodable { let text: String }

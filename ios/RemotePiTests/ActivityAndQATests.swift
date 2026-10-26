@@ -24,6 +24,45 @@ final class ActivityAndQATests: XCTestCase {
         XCTAssertEqual(AgentActivity(kind: .question).label, "Waiting for your answer")
     }
 
+    /// The EXACT frame captured live off the wire, through the same
+    /// JSONSerialization → [String: Any] → `AgentActivity(json:)` → reducer
+    /// path `handleAgentStatus` uses. Guards the device regression where the
+    /// banner showed only "Working…" and the timer counted only from open.
+    func testLiveToolFrameParsesAndLabelsRunningBash() throws {
+        let raw = #"{"type":"agent_status","phase":"streaming","busy":true,"working":true,"owner":"tui","activity":{"kind":"tool","since":1793014975650,"tool":"bash","toolCount":1},"questionId":null}"#
+        let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any])
+        let activityDict = try XCTUnwrap(obj["activity"] as? [String: Any])
+        let parsed = try XCTUnwrap(AgentActivity(json: activityDict), "activity must not fail to parse")
+        XCTAssertEqual(parsed.kind, .tool)
+        XCTAssertEqual(parsed.tool, "bash")
+        XCTAssertEqual(parsed.toolCount, 1)
+        // Was truncated by NSNumber.intValue (Int32): 1793014975650 → garbage.
+        XCTAssertEqual(parsed.since, 1_793_014_975_650, "ms epoch must survive 64-bit")
+        XCTAssertEqual(parsed.label, "Running bash")
+
+        var state = AgentStatusState()
+        state.apply(.status(busy: true, owner: "tui", v2: true, isSnapshot: true,
+                            activity: parsed, hasActivity: true))
+        XCTAssertEqual(state.displayActivity?.kind, .tool)
+        XCTAssertEqual(state.workingText, "Running bash")
+    }
+
+    func testReducerLabelsForEachKindFromParsedFrames() {
+        func apply(_ json: [String: Any]) -> AgentStatusState {
+            var state = AgentStatusState()
+            state.apply(.status(busy: true, owner: "tui", v2: true, isSnapshot: true,
+                                activity: AgentActivity(json: json), hasActivity: true))
+            return state
+        }
+        XCTAssertEqual(apply(["kind": "thinking", "since": 1_793_014_975_650]).workingText, "Thinking…")
+        XCTAssertEqual(apply(["kind": "writing"]).workingText, "Writing…")
+        XCTAssertEqual(apply(["kind": "compacting", "percent": 42, "reason": "threshold"]).workingText,
+                       "Compacting context… 42%")
+        XCTAssertEqual(apply(["kind": "retrying", "attempt": 2, "maxAttempts": 3, "delayMs": 1500]).workingText,
+                       "Retrying (2/3)…")
+        XCTAssertEqual(apply(["kind": "toolcall", "tool": "edit"]).workingText, "Preparing edit…")
+    }
+
     func testActivityJSONIsTolerant() {
         let tool = AgentActivity(json: ["kind": "tool", "tool": "read", "toolCount": 2, "since": 1_730_000_000_000])
         XCTAssertEqual(tool?.label, "Running read +1")
@@ -124,6 +163,57 @@ final class ActivityAndQATests: XCTestCase {
         XCTAssertEqual(state.activitySince, t0.addingTimeInterval(6), "tool count keeps the clock")
         state.apply(status(busy: true, AgentActivity(kind: .tool, tool: "read")), now: t0.addingTimeInterval(8))
         XCTAssertEqual(state.activitySince, t0.addingTimeInterval(8))
+    }
+
+    func testBusySinceDrivesStableTimerAcrossSubActivities() {
+        let now = Date()
+        let nowMs = Int(now.timeIntervalSince1970 * 1000)
+        let busyStart = nowMs - 45_000               // working for 45s
+        func frame(_ kind: AgentActivity.Kind, tool: String?, sub: Int) -> AgentStatusState.Event {
+            // `since` (sub-activity start) moves; `busySince` is stable.
+            .status(busy: true, owner: "tui", v2: true, isSnapshot: false,
+                    activity: AgentActivity(kind: kind, since: nowMs - sub, busySince: busyStart,
+                                            tool: tool),
+                    hasActivity: true)
+        }
+        var state = AgentStatusState()
+        state.apply(frame(.thinking, tool: nil, sub: 2_000), now: now)
+        let start = state.activitySince
+        XCTAssertEqual(start?.timeIntervalSince1970 ?? 0, TimeInterval(busyStart) / 1000, accuracy: 0.01)
+        // Sub-activity transitions must NOT restart the timer.
+        state.apply(frame(.tool, tool: "bash", sub: 500), now: now.addingTimeInterval(5))
+        XCTAssertEqual(state.activitySince, start)
+        state.apply(frame(.writing, tool: nil, sub: 100), now: now.addingTimeInterval(9))
+        XCTAssertEqual(state.activitySince, start)
+
+        // A new turn (new busySince) resets it.
+        let newBusy = nowMs + 10_000
+        state.apply(.status(busy: true, owner: "tui", v2: true, isSnapshot: false,
+                            activity: AgentActivity(kind: .waiting, busySince: newBusy),
+                            hasActivity: true), now: now.addingTimeInterval(10))
+        XCTAssertEqual(state.activitySince?.timeIntervalSince1970 ?? 0,
+                       TimeInterval(newBusy) / 1000, accuracy: 0.01)
+
+        // Idle clears it.
+        state.apply(.status(busy: false, owner: "tui", v2: true, isSnapshot: false,
+                            activity: nil, hasActivity: true), now: now.addingTimeInterval(11))
+        XCTAssertNil(state.activitySince)
+    }
+
+    func testBusySinceFallsBackWhenAbsentOrImplausible() {
+        let now = Date()
+        let nowMs = Int(now.timeIntervalSince1970 * 1000)
+        // No busySince: fall back to local-clock, restart on kind change.
+        var noBusy = AgentStatusState()
+        noBusy.apply(.status(busy: true, owner: "tui", v2: true, isSnapshot: false,
+                             activity: AgentActivity(kind: .tool, tool: "bash"), hasActivity: true), now: now)
+        XCTAssertEqual(noBusy.activitySince, now)
+        // busySince in the future is ignored (clock skew) → local fallback.
+        var future = AgentStatusState()
+        future.apply(.status(busy: true, owner: "tui", v2: true, isSnapshot: false,
+                             activity: AgentActivity(kind: .tool, tool: "bash", busySince: nowMs + 120_000),
+                             hasActivity: true), now: now)
+        XCTAssertEqual(future.activitySince, now)
     }
 
     func testSnapshotSinceIsUsedOnlyWhenPlausible() {

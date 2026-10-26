@@ -7,6 +7,7 @@ struct TranscriptActions {
     var loadMore: @MainActor () -> Void = {}
     var nearBottomChanged: @MainActor (Bool) -> Void = { _ in }
     var cancelQueued: @MainActor (String) -> Void = { _ in }
+    var steerQueued: @MainActor (String) -> Void = { _ in }
     var discardOffline: @MainActor (String) -> Void = { _ in }
     var fork: @MainActor (String) -> Void = { _ in }
     var selectText: @MainActor (String) -> Void = { _ in }
@@ -356,6 +357,7 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
         let render = rows[id] ?? syncRender(item)
         cell.configure(item: item, render: render, style: style, expanded: expanded.contains(id))
         cell.onAction = { [weak self] in self?.performRowAction(id: id) }
+        cell.onSteer = { [weak self] in self?.performSteer(id: id) }
         cell.onToggleExpand = { [weak self] in self?.toggleExpanded(id: id) }
     }
 
@@ -377,6 +379,12 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
         case .offline: actions.discardOffline(actionId)
         default: break
         }
+    }
+
+    private func performSteer(id: String) {
+        guard let item = items[id], item.kind == .queued, item.canSteer,
+              let actionId = item.actionId else { return }
+        actions.steerQueued(actionId)
     }
 
     private func toggleExpanded(id: String) {

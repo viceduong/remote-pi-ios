@@ -88,6 +88,10 @@ struct AgentActivity: Codable, Hashable {
     var kind: Kind
     /// ms epoch (server clock) when THIS kind/tool started.
     var since: Int?
+    /// ms epoch when the current CONTINUOUS busy period began — stable across
+    /// sub-activity transitions, correct across reconnects (contract §7). The
+    /// banner's elapsed timer reads from this. Absent on older servers.
+    var busySince: Int?
     var tool: String?
     var toolCount: Int?
     var reason: String?
@@ -96,11 +100,12 @@ struct AgentActivity: Codable, Hashable {
     var maxAttempts: Int?
     var delayMs: Int?
 
-    init(kind: Kind, since: Int? = nil, tool: String? = nil, toolCount: Int? = nil,
+    init(kind: Kind, since: Int? = nil, busySince: Int? = nil, tool: String? = nil, toolCount: Int? = nil,
          reason: String? = nil, percent: Int? = nil, attempt: Int? = nil,
          maxAttempts: Int? = nil, delayMs: Int? = nil) {
         self.kind = kind
         self.since = since
+        self.busySince = busySince
         self.tool = tool.flatMap { $0.isEmpty ? nil : $0 }
         self.toolCount = toolCount
         self.reason = reason
@@ -111,7 +116,7 @@ struct AgentActivity: Codable, Hashable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case kind, since, tool, toolCount, reason, percent, attempt, maxAttempts, delayMs
+        case kind, since, busySince, tool, toolCount, reason, percent, attempt, maxAttempts, delayMs
     }
 
     /// Only `kind` is required; an unknown (newer) kind reads as "waiting".
@@ -120,6 +125,7 @@ struct AgentActivity: Codable, Hashable {
         let raw = try c.decode(String.self, forKey: .kind)
         self.init(kind: Kind(rawValue: raw) ?? .waiting,
                   since: Self.flexibleInt(c, .since),
+                  busySince: Self.flexibleInt(c, .busySince),
                   tool: try? c.decodeIfPresent(String.self, forKey: .tool),
                   toolCount: Self.flexibleInt(c, .toolCount),
                   reason: try? c.decodeIfPresent(String.self, forKey: .reason),
@@ -132,9 +138,16 @@ struct AgentActivity: Codable, Hashable {
     /// Build from an untyped SSE `agent_status.activity` object.
     init?(json: [String: Any]) {
         guard let raw = json["kind"] as? String else { return nil }
-        func int(_ key: String) -> Int? { (json[key] as? NSNumber)?.intValue }
+        // NSNumber.intValue is Int32 — it TRUNCATES ms-epoch values like
+        // `since`/`busySince` (1.79e12 → garbage). int64Value is lossless and
+        // fits Int on every 64-bit device (all iOS 15 hardware).
+        func int(_ key: String) -> Int? {
+            guard let n = json[key] as? NSNumber else { return nil }
+            return Int(n.int64Value)
+        }
         self.init(kind: Kind(rawValue: raw) ?? .waiting,
                   since: int("since"),
+                  busySince: int("busySince"),
                   tool: json["tool"] as? String,
                   toolCount: int("toolCount"),
                   reason: json["reason"] as? String,
