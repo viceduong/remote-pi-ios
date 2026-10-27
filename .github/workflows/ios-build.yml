@@ -93,4 +93,15 @@ jobs:
           xcodebuild test -project AiChing.xcodeproj -scheme RemotePi \
             -destination "platform=iOS Simulator,id=$UDID" \
             -only-testing:RemotePiTests/ExpandCrashReproTests \
+            -only-testing:RemotePiTests/QuestionSnapshotTests \
+            -only-testing:RemotePiTests/ModelPickerSnapshotTests \
+            -only-testing:RemotePiTests/NewSessionSnapshotTests \
             CODE_SIGNING_ALLOWED=NO
+      - name: Upload iOS 15 snapshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RemotePi-snapshots-ios15
+          path: ~/remotepi-snapshots
+          if-no-files-found: warn
+          retention-days: 14
