@@ -145,7 +145,14 @@ enum QueueReconciler {
             }
             // A `queued` item is by definition undelivered — only a `running`
             // one can already have its user row in the transcript.
-            if s.status == "running", deliveredByText(s) { continue }
+            if s.status == "running", deliveredByText(s) {
+                // The local twin of this send (same clientMessageId) must count
+                // as delivered too — the row was consumed by THIS match, so a
+                // second text match for the twin would fail and leave a
+                // "sending" chip stuck under the delivered row.
+                if let cid = s.clientMessageId { deliveredCids.insert(cid) }
+                continue
+            }
             if let cid = s.clientMessageId { seenCids.insert(cid) }
             chips.append(QueueChip(rowId: "q:" + (s.clientMessageId ?? s.id), item: s,
                                    serverId: s.id, origin: .server))

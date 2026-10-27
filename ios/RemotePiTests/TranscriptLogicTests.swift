@@ -86,6 +86,19 @@ final class TranscriptLogicTests: XCTestCase {
         XCTAssertEqual(result.chips.first?.serverId, "srv-1")
     }
 
+    /// Regression (device report): the delivered user row carried no
+    /// clientMessageId; the server's running item text-matched it first and
+    /// consumed it, so the local "sending" twin found no row left and stayed
+    /// stuck under the delivered message.
+    func testRunningServerItemAndLocalTwinBothDeliveredByOneTextMatch() {
+        let local = queue("pending:c7", "Downloaded to D:/randochat", status: "sending", cid: "c7", at: 9000)
+        let server = queue("srv-7", "Downloaded to D:/randochat", status: "running", cid: "c7", at: 9001)
+        let echo = msg(entryId: "e7", role: .user, text: "Downloaded to D:/randochat", ts: 9002, cid: nil)
+        let result = QueueReconciler.reconcile(localPending: [local], server: [server], piNative: [], messages: [echo])
+        XCTAssertTrue(result.chips.isEmpty, "no stuck 'sending' chip under the delivered row")
+        XCTAssertEqual(result.deliveredLocal, ["c7"])
+    }
+
     func testPiNativeQueueDoesNotDuplicateServerItem() {
         let server = queue("srv-1", "fix the\nbuild", cid: "c1")
         let result = QueueReconciler.reconcile(localPending: [], server: [server],
