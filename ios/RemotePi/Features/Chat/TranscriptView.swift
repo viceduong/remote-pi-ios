@@ -311,9 +311,15 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
             if !pinned { anchor = edgeAnchor(for: toggled) }
         }
         if anchor == nil, !pinned { anchor = captureAnchor(excluding: changedIds) }
-        var heightChanged = false
+        // Rows whose height changed are RELOADED (the table re-queries their
+        // height inside the diffable update); content-only changes are
+        // reconfigured in place. Never follow `apply` with
+        // `performBatchUpdates(nil)` to refresh heights: on iOS 15 that trips
+        // UITableView's internal consistency assertion (SIGABRT on "Show all
+        // N lines").
+        var heightChangedIds = Set<String>()
         for (id, render) in rendered {
-            if let old = rows[id], old.layout.height != render.layout.height { heightChanged = true }
+            if let old = rows[id], old.layout.height != render.layout.height { heightChangedIds.insert(id) }
             rows[id] = render
         }
 
@@ -330,12 +336,15 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
         var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
         snapshot.appendSections([0])
         snapshot.appendItems(order, toSection: 0)
-        let reconfigure = order.filter { changedIds.contains($0) }
+        // Only ids present in both the old and new snapshot may be reloaded or
+        // reconfigured, and never both at once.
+        let reload = order.filter { heightChangedIds.contains($0) && oldIds.contains($0) }
+        let reconfigure = order.filter { changedIds.contains($0) && !heightChangedIds.contains($0) }
+        if !reload.isEmpty { snapshot.reloadItems(reload) }
         if !reconfigure.isEmpty { snapshot.reconfigureItems(reconfigure) }
 
         UIView.performWithoutAnimation {
             dataSource.apply(snapshot, animatingDifferences: false)
-            if heightChanged { tableView.performBatchUpdates(nil) }
             tableView.layoutIfNeeded()
         }
 
