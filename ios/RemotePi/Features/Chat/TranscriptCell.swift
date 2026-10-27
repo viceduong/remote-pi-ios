@@ -240,7 +240,7 @@ final class TranscriptCell: UITableViewCell {
             steerButton.accessibilityHint = "Interrupts the agent and sends this message immediately"
         } else if item.kind == .qa {
             let tint = item.qa?.cancelled == true ? style.secondaryText : style.accent
-            headerIcon.image = UIImage(systemName: "questionmark.bubble")
+            headerIcon.image = UIImage(systemName: "questionmark.circle")
             headerIcon.tintColor = tint
             headerLabel.text = item.statusText
             headerLabel.font = style.headerFont

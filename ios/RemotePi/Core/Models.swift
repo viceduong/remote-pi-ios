@@ -199,7 +199,7 @@ struct AgentActivity: Codable, Hashable {
         case .tool: return "wrench.and.screwdriver"
         case .compacting: return "archivebox"
         case .retrying: return "arrow.triangle.2.circlepath"
-        case .question: return "questionmark.bubble"
+        case .question: return "questionmark.circle"
         }
     }
 

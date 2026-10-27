@@ -47,28 +47,47 @@ private enum SSEParserError: LocalizedError {
     }
 }
 
-/// TEMP shim (pre-fix repro): same splitting as AsyncBytes.lines (drops empty lines).
+/// Splits a byte stream into lines on LF, CRLF or CR, KEEPING empty lines
+/// (SSE event terminators). Lines are decoded as UTF-8 (lossy).
 struct SSELineSplitter<Base: AsyncSequence>: AsyncSequence where Base.Element == UInt8 {
     typealias Element = String
     let bytes: Base
+
     struct AsyncIterator: AsyncIteratorProtocol {
         var base: Base.AsyncIterator
         var buffer: [UInt8] = []
+        var lastWasCR = false
+        var finished = false
+
         mutating func next() async throws -> String? {
-            while let b = try await base.next() {
-                if b == 0x0A || b == 0x0D {
-                    if buffer.isEmpty { continue }
-                    defer { buffer.removeAll() }
-                    return String(decoding: buffer, as: UTF8.self)
+            if finished { return nil }
+            while let byte = try await base.next() {
+                if byte == 0x0A { // LF (the LF of a CRLF was already handled by CR)
+                    if lastWasCR { lastWasCR = false; continue }
+                    return take()
                 }
-                buffer.append(b)
+                lastWasCR = false
+                if byte == 0x0D { // CR: end of line; swallow a following LF
+                    lastWasCR = true
+                    return take()
+                }
+                buffer.append(byte)
             }
-            if buffer.isEmpty { return nil }
-            defer { buffer.removeAll() }
+            finished = true
+            // A trailing unterminated line is still a line (the parser
+            // discards incomplete events at EOF anyway).
+            return buffer.isEmpty ? nil : take()
+        }
+
+        private mutating func take() -> String {
+            defer { buffer.removeAll(keepingCapacity: true) }
             return String(decoding: buffer, as: UTF8.self)
         }
     }
-    func makeAsyncIterator() -> AsyncIterator { AsyncIterator(base: bytes.makeAsyncIterator()) }
+
+    func makeAsyncIterator() -> AsyncIterator {
+        AsyncIterator(base: bytes.makeAsyncIterator())
+    }
 }
 
 /// Stateful SSE wire parser. It is confined to one EventSource task.
@@ -167,6 +186,7 @@ final class EventSource {
     private var pendingFrames: [(generation: Int, frame: ParsedSSEFrame)] = []
     private var drainScheduled = false
 
+    /// `configuration` is injectable for tests (URLProtocol stubs).
     init(url: URL, token: String, configuration: URLSessionConfiguration = .default) {
         self.url = url
         self.token = token
@@ -266,7 +286,10 @@ final class EventSource {
 
                 openedAt = Date()
                 emitState(.connected, generation: generation)
-                for try await line in bytes.lines {
+                // NOT `bytes.lines`: AsyncLineSequence drops empty lines, and
+                // the empty line is exactly what terminates an SSE event — with
+                // it no frame would ever be dispatched.
+                for try await line in SSELineSplitter(bytes: bytes) {
                     guard isCurrent(generation) else { break }
                     let frame = try parser.consume(line)
                     if let retry = parser.takeRetryMilliseconds() {

@@ -490,7 +490,7 @@ struct QuestionCardView: View {
 
     private var header: some View {
         HStack(spacing: 6) {
-            Image(systemName: "questionmark.bubble")
+            Image(systemName: "questionmark.circle")
                 .accessibilityHidden(true)
             Text(question.items.count > 1 ? "Agent question · \(question.items.count) questions" : "Agent question")
                 .font(.caption.weight(.semibold))
