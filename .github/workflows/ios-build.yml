@@ -67,7 +67,7 @@ jobs:
   expand-ios15:
     name: Expand repro (iOS 15 simulator)
     runs-on: macos-14
-    continue-on-error: true
+
     steps:
       - uses: actions/checkout@v4
       - name: Install XcodeGen
