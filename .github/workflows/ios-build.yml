@@ -84,6 +84,8 @@ jobs:
         run: |
           cd ios
           xcodegen generate --spec project.yml
+          # Xcode 15.4 cannot open the Xcode 16 project format (objectVersion 77).
+          sed -i '' -E 's/objectVersion = [0-9]+;/objectVersion = 56;/' AiChing.xcodeproj/project.pbxproj
           RT=$(xcrun simctl list runtimes | grep -oE 'com\.apple\.CoreSimulator\.SimRuntime\.iOS-15-[0-9]+' | tail -1)
           echo "runtime: $RT"
           test -n "$RT"
