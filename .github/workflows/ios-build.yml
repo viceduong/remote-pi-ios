@@ -63,3 +63,32 @@ jobs:
           path: ~/remotepi-snapshots
           if-no-files-found: warn
           retention-days: 14
+
+  expand-ios15:
+    name: Expand repro (iOS 15 simulator)
+    runs-on: macos-14
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Install iOS 15 simulator runtime
+        run: |
+          xcodebuild -version
+          xcrun simctl list runtimes
+          if ! xcrun simctl list runtimes | grep -q 'iOS 15'; then
+            sudo xcodes runtimes install "iOS 15.5" || true
+          fi
+          xcrun simctl list runtimes
+      - name: Run expand tests on iOS 15
+        run: |
+          cd ios
+          xcodegen generate --spec project.yml
+          RT=$(xcrun simctl list runtimes | grep -oE 'com\.apple\.CoreSimulator\.SimRuntime\.iOS-15-[0-9]+' | tail -1)
+          echo "runtime: $RT"
+          test -n "$RT"
+          UDID=$(xcrun simctl create ios15 "iPhone 13" "$RT")
+          xcodebuild test -project AiChing.xcodeproj -scheme RemotePi \
+            -destination "platform=iOS Simulator,id=$UDID" \
+            -only-testing:RemotePiTests/ExpandCrashReproTests \
+            CODE_SIGNING_ALLOWED=NO
