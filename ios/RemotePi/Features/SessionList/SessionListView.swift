@@ -17,7 +17,9 @@ struct SessionListView: View {
     @State private var hasMore = true
     @State private var isLoadingMore = false
     @State private var showNewSession = false
-    @State private var newSessionName = ""
+    /// Created in the sheet; opened once the sheet has finished dismissing
+    /// (pushing under a dismissing sheet is unreliable on iOS 15).
+    @State private var createdSession: SessionSummary?
     @State private var errorMessage: String?
     @State private var serverInfo: ServerInfo?
     @State private var openSession: SessionSummary?
@@ -190,12 +192,15 @@ struct SessionListView: View {
                 } label: {
                     Image(systemName: "plus")
                 }
+                .accessibilityLabel("New session")
             }
         }
-        .alert("New session", isPresented: $showNewSession) {
-            TextField("Name", text: $newSessionName)
-            Button("Create") { create() }
-            Button("Cancel", role: .cancel) { newSessionName = "" }
+        .sheet(isPresented: $showNewSession, onDismiss: { openCreatedSession() }) {
+            NewSessionSheet(model: NewSessionModel(api: client, memory: WorkdirMemory(serverKey: server.id)),
+                            theme: theme) { session in
+                createdSession = session
+                showNewSession = false
+            }
         }
         .background(
             NavigationLink(destination: Group {
@@ -315,20 +320,15 @@ struct SessionListView: View {
         }
     }
 
-    private func create() {
-        let name = newSessionName.trimmingCharacters(in: .whitespacesAndNewlines)
-        newSessionName = ""
-        Task {
-            do {
-                let session = try await client.createSession(name: name)
-                sessions.insert(session, at: 0)
-                openSession = session
-            } catch is CancellationError {
-                // Create abandoned — not an error.
-            } catch {
-                errorMessage = error.localizedDescription
-            }
-        }
+    /// After the new-session sheet closes: insert the created session and
+    /// open it — the same as the old inline create did.
+    private func openCreatedSession() {
+        guard let session = createdSession else { return }
+        createdSession = nil
+        // An idempotent retry can hand back a session the list already has.
+        sessions.removeAll { $0.id == session.id }
+        sessions.insert(session, at: 0)
+        openSession = session
     }
 
     private func delete(_ session: SessionSummary, force: Bool = false) {

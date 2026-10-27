@@ -53,7 +53,9 @@ struct APIClient {
         return req
     }
 
-    private func send(_ req: URLRequest) async throws -> Data {
+    /// Performs the request; returns the body + status without judging the
+    /// status (network failures → `APIError.offline` / `CancellationError`).
+    private func sendRaw(_ req: URLRequest) async throws -> (Data, Int) {
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await Self.session.data(for: req)
@@ -68,16 +70,38 @@ struct APIClient {
         guard data.count <= 16 * 1024 * 1024 else {
             throw APIError.decoding("response exceeded 16 MiB safety limit")
         }
-        guard (200...299).contains(http.statusCode) else {
-            let body = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
-            let nestedMessage = (body?["error"] as? [String: Any])?["message"] as? String
-            let message = body?["error"] as? String
-                ?? nestedMessage
-                ?? HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
-            let apiCode = body?["code"] as? String
-            throw APIError.http(http.statusCode, message, apiCode)
+        return (data, http.statusCode)
+    }
+
+    private func send(_ req: URLRequest) async throws -> Data {
+        let (data, status) = try await sendRaw(req)
+        guard (200...299).contains(status) else {
+            throw Self.httpError(status: status, data: data)
         }
         return data
+    }
+
+    /// Like `send`, but §12 workdir rejections throw `WorkdirRejection`
+    /// (carrying `roots`) instead of a generic `APIError.http`.
+    private func sendWorkdirAware(_ req: URLRequest, dirsEndpoint: Bool) async throws -> Data {
+        let (data, status) = try await sendRaw(req)
+        guard (200...299).contains(status) else {
+            if let rejection = WorkdirRejection.parse(status: status, data: data, dirsEndpoint: dirsEndpoint) {
+                throw rejection
+            }
+            throw Self.httpError(status: status, data: data)
+        }
+        return data
+    }
+
+    private static func httpError(status: Int, data: Data) -> APIError {
+        let body = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let nestedMessage = (body?["error"] as? [String: Any])?["message"] as? String
+        let message = body?["error"] as? String
+            ?? nestedMessage
+            ?? HTTPURLResponse.localizedString(forStatusCode: status)
+        let apiCode = body?["code"] as? String
+        return APIError.http(status, message, apiCode)
     }
 
     func get<T: Decodable>(_ path: String) async throws -> T {
@@ -150,12 +174,51 @@ struct APIClient {
         return wrapper.session
     }
 
-    func createSession(name: String) async throws -> SessionSummary {
+    /// `POST /api/sessions {name, workdir?, createDir?, clientRequestId?}`.
+    /// `workdir == nil` sends the legacy body (server default folder), so this
+    /// works against pre-§12 servers. Folder rejections (403
+    /// `workdir_forbidden {roots}`, 404 `workdir_missing`, 400
+    /// `workdir_not_dir` / invalid path) throw `WorkdirRejection`.
+    func createSession(name: String, workdir: String? = nil, createDir: Bool = false,
+                       clientRequestId: String? = nil) async throws -> SessionSummary {
         struct Wrapper: Decodable { let session: SessionSummary }
-        struct Req: Encodable { let name: String }
-        let wrapper: Wrapper = try await post("/api/sessions", body: Req(name: name))
+        struct Req: Encodable {
+            let name: String
+            let workdir: String?
+            let createDir: Bool?
+            let clientRequestId: String?
+        }
+        let body = Req(name: name, workdir: workdir,
+                       createDir: workdir == nil ? nil : createDir,
+                       clientRequestId: clientRequestId)
+        let data = try await sendWorkdirAware(makeRequest("/api/sessions", method: "POST", body: body),
+                                              dirsEndpoint: false)
+        let wrapper = try await decode(Wrapper.self, from: data)
         return wrapper.session
     }
+
+    /// Contract §12: `GET /api/dirs` → `{roots, recent, default}`. An older
+    /// server answers 404 (→ `APIError.http(404, …)`).
+    func dirRoots() async throws -> DirRoots {
+        try await get("/api/dirs")
+    }
+
+    /// Contract §12: `GET /api/dirs?path=<abs>` → listing of subfolders.
+    /// Outside the roots → `WorkdirRejection` (403, with `roots`).
+    func listDirs(path: String) async throws -> DirListing {
+        guard let encoded = path.addingPercentEncoding(withAllowedCharacters: Self.queryValueAllowed) else {
+            throw APIError.invalidURL
+        }
+        let data = try await sendWorkdirAware(makeRequest("/api/dirs?path=\(encoded)"), dirsEndpoint: true)
+        return try await decode(DirListing.self, from: data)
+    }
+
+    /// Query-value-safe characters (`&`, `=`, `+`, `#` must be escaped).
+    static let queryValueAllowed: CharacterSet = {
+        var set = CharacterSet.urlQueryAllowed
+        set.remove(charactersIn: "&=+#?")
+        return set
+    }()
 
     func deleteSession(_ id: String, purge: Bool = false, force: Bool = false) async throws {
         var qs = "purge=\(purge ? "1" : "0")"
@@ -338,3 +401,6 @@ struct APIClient {
         try await postNoResponse("/api/sessions/\(id)/abort")
     }
 }
+
+/// Contract §12 endpoints used by the new-session sheet.
+extension APIClient: WorkdirService {}

@@ -54,6 +54,9 @@ struct ChatView: View {
         .navigationTitle(session.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                ChatTitleView(title: session.name, workdir: session.workdir)
+            }
             ToolbarItem(placement: .navigationBarTrailing) {
                 HStack(spacing: 12) {
                     Menu {
@@ -61,6 +64,13 @@ struct ChatView: View {
                             viewModel.requestFork(entryId: nil, name: "fork of \(session.name)")
                         } label: {
                             Label("Fork at latest message", systemImage: "arrow.branch")
+                        }
+                        if let workdir = session.workdir, !workdir.isEmpty {
+                            Button {
+                                UIPasteboard.general.string = workdir
+                            } label: {
+                                Label("Copy folder path", systemImage: "doc.on.doc")
+                            }
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")
@@ -811,5 +821,44 @@ extension DynamicTypeSize {
         case .accessibility5: return .accessibilityExtraExtraExtraLarge
         @unknown default: return .large
         }
+    }
+}
+
+/// Navigation-bar title: session name + its working folder (contract §12),
+/// so the chat screen shows where the agent runs (same path as the session
+/// list row, middle-truncated).
+struct ChatTitleView: View {
+    let title: String
+    let workdir: String?
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(spacing: 1) {
+            Text(title)
+                .font(.headline)
+                .foregroundColor(theme.text)
+                .lineLimit(1)
+            if let workdir, !workdir.isEmpty {
+                HStack(spacing: 3) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 9, weight: .semibold))
+                        .accessibilityHidden(true)
+                    Text(workdir)
+                        .font(.system(.caption2, design: .monospaced))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .foregroundColor(theme.secondaryText)
+            }
+        }
+        .frame(maxWidth: 240)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityText)
+        .accessibilityAddTraits(.isHeader)
+    }
+
+    private var accessibilityText: String {
+        guard let workdir, !workdir.isEmpty else { return title }
+        return "\(title), folder \(workdir)"
     }
 }
