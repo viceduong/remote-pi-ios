@@ -124,8 +124,7 @@ struct ChatView: View {
                 if let uuid = UUID(uuidString: id) { vm.discardOffline(uuid) }
             },
             fork: { entryId in vm.requestFork(entryId: entryId, name: forkName) },
-            selectText: { text in selection.wrappedValue = SelectableText(text: text) },
-            questionVisibilityChanged: { vm.setQuestionRowVisible($0) }
+            selectText: { text in selection.wrappedValue = SelectableText(text: text) }
         )
     }
 
@@ -176,11 +175,10 @@ struct ChatView: View {
     }
 }
 
-// MARK: - Transcript area (UIKit transcript + "Question waiting" pill)
+// MARK: - Transcript area
 
-/// The transcript plus the non-blocking "Question waiting" pill shown above
-/// the composer while a question is pending and its inline card (the newest
-/// transcript row) is scrolled out of view. Shared by `ChatView` and tests.
+/// The UIKit transcript (incl. the inline question card as its newest row).
+/// Shared by `ChatView` and tests.
 struct ChatTranscriptArea: View {
     @ObservedObject var viewModel: ChatViewModel
     let theme: AppTheme
@@ -194,45 +192,6 @@ struct ChatTranscriptArea: View {
                        textScale: textScale,
                        contentSize: contentSize,
                        actions: actions)
-            .overlay(alignment: .bottom) {
-                if viewModel.showsQuestionWaitingPill {
-                    QuestionWaitingPill {
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        viewModel.scrollTranscriptToBottom()
-                    }
-                    .padding(.bottom, 10)
-                }
-            }
-    }
-}
-
-/// Small capsule that jumps to the pending question card.
-struct QuestionWaitingPill: View {
-    let action: () -> Void
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: "questionmark.circle.fill")
-                    .font(.caption.weight(.semibold))
-                Text("Question waiting")
-                    .font(.caption.weight(.semibold))
-                Image(systemName: "chevron.down")
-                    .font(.caption2.weight(.bold))
-            }
-            .foregroundColor(.white)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(Capsule().fill(theme.accent))
-            .shadow(color: Color.black.opacity(0.2), radius: 4, x: 0, y: 2)
-            .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Question waiting")
-        .accessibilityHint("Scrolls to the agent's question")
-        .accessibilityAddTraits(.isButton)
     }
 }
 

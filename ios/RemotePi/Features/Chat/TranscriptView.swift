@@ -12,7 +12,6 @@ struct TranscriptActions {
     var fork: @MainActor (String) -> Void = { _ in }
     var selectText: @MainActor (String) -> Void = { _ in }
     /// The inline question row (newest row) came on / went off screen.
-    var questionVisibilityChanged: @MainActor (Bool) -> Void = { _ in }
 }
 
 /// SwiftUI bridge for the UIKit transcript. Data does NOT flow through
@@ -112,7 +111,6 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
     var questionContent: (@MainActor (AgentQuestion) -> AnyView)?
     /// Offscreen controller used only to measure the question card.
     private lazy var measuringHost = UIHostingController(rootView: AnyView(EmptyView()))
-    private var lastQuestionVisible = false
 
     init(style: TranscriptStyle) {
         self.style = style
@@ -707,20 +705,5 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
             lastNearBottom = near
             actions.nearBottomChanged(near)
         }
-        let questionVisible = isQuestionRowVisible
-        if questionVisible != lastQuestionVisible {
-            lastQuestionVisible = questionVisible
-            actions.questionVisibilityChanged(questionVisible)
-        }
-    }
-
-    /// The newest row is the question card and at least part of it (44pt,
-    /// or all of a shorter row) is inside the viewport.
-    private var isQuestionRowVisible: Bool {
-        guard let first = order.first, items[first]?.kind == .question,
-              tableView.numberOfSections > 0, tableView.numberOfRows(inSection: 0) > 0 else { return false }
-        let rect = tableView.rectForRow(at: IndexPath(row: 0, section: 0))
-        let overlap = rect.intersection(tableView.bounds)
-        return !overlap.isNull && overlap.height >= min(44, rect.height)
     }
 }

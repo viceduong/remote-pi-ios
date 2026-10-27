@@ -51,8 +51,6 @@ final class ChatViewModel: ObservableObject {
     @Published var questionText: [Int: String] = [:]
     /// Transcript viewport state for the "Question waiting" pill: the user
     /// is (not) near the bottom / the inline question row is (not) on screen.
-    @Published private(set) var viewportAtBottom = true
-    @Published private(set) var questionRowVisible = false
     @Published var errorMessage: String?
     @Published var infoMessage: String?
     /// Set after a successful fork — ChatView pops back to the session list.
@@ -251,29 +249,6 @@ final class ChatViewModel: ObservableObject {
 
     func setViewportNearBottom(_ value: Bool) {
         viewportNearBottom = value
-        // Reported from scroll callbacks that can run inside a SwiftUI update
-        // (layout) — publish on the next turn, never during a view update.
-        Task { @MainActor [weak self] in
-            guard let self, self.viewportAtBottom != value else { return }
-            self.viewportAtBottom = value
-        }
-    }
-
-    func setQuestionRowVisible(_ value: Bool) {
-        Task { @MainActor [weak self] in
-            guard let self, self.questionRowVisible != value else { return }
-            self.questionRowVisible = value
-        }
-    }
-
-    /// A question is pending but its inline card is scrolled out of view.
-    var showsQuestionWaitingPill: Bool {
-        pendingQuestion != nil && !viewportAtBottom && !questionRowVisible
-    }
-
-    /// Jump the transcript to the newest row (the "Question waiting" pill).
-    func scrollTranscriptToBottom() {
-        scrollToBottomRequests.send(())
     }
 
     func retryLoad() {

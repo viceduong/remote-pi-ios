@@ -78,8 +78,7 @@ final class QuestionSnapshotTests: XCTestCase {
             let model = vm
             ChatTranscriptArea(viewModel: vm, theme: theme, textScale: 1, contentSize: .large,
                                actions: TranscriptActions(
-                                   nearBottomChanged: { model.setViewportNearBottom($0) },
-                                   questionVisibilityChanged: { model.setQuestionRowVisible($0) }))
+                                   nearBottomChanged: { model.setViewportNearBottom($0) }))
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     ChatBottomBar(viewModel: vm, status: vm.status)
                 }
@@ -163,7 +162,6 @@ final class QuestionSnapshotTests: XCTestCase {
             XCTAssertEqual(vm.transcript.value.last?.kind, .question)
             XCTAssertEqual(vm.transcript.value.first?.kind, .user)
             XCTAssertNotNil(questionCell(in: window))
-            XCTAssertFalse(vm.showsQuestionWaitingPill, "no pill while the card is on screen")
 
             writeSnapshot(of: window, name: "question-inline-empty-\(name)")
 
@@ -179,39 +177,6 @@ final class QuestionSnapshotTests: XCTestCase {
             vm.commitNow()
             XCTAssertEqual(questionItems(vm).count, 0, "resolved question must leave the transcript")
             XCTAssertTrue(waitUntil { self.questionCell(in: window) == nil }, "question cell must go away")
-            window.isHidden = true
-        }
-    }
-
-    /// Scrolled up when the question arrives: the "Question waiting" pill
-    /// shows above the composer; tapping it (its action) returns to the card.
-    func testQuestionWaitingPillWhenScrolledUp() throws {
-        for (name, theme) in [("dark", AppTheme.darkGrey), ("light", AppTheme.light)] {
-            let vm = makeViewModel()
-            let window = present(vm, theme: theme)
-            var history: [String] = []
-            for i in 0..<24 {
-                let ts = 1_793_033_600_000 + i * 1_000
-                history.append(i % 2 == 0
-                    ? userMessage(id: "u\(i)", text: "Message \(i): what about the next step?", ts: ts)
-                    : assistantMessage(id: "a\(i)", text: "Reply \(i).\nHere is a longer answer with a second line,\nand a third one for height.", ts: ts))
-            }
-            showQuestion(vm, in: window, history: history)
-            let container = try XCTUnwrap(transcript(in: window))
-            let table = container.tableView
-
-            // Scroll up (inverted table: larger offset = older rows).
-            let top = table.contentSize.height + table.contentInset.bottom - table.bounds.height
-            XCTAssertGreaterThan(top, 400, "history must be scrollable")
-            table.setContentOffset(CGPoint(x: 0, y: top), animated: false)
-            XCTAssertTrue(waitUntil { vm.showsQuestionWaitingPill }, "pill must show when the card is off screen")
-            spin(0.3)
-            writeSnapshot(of: window, name: "question-inline-scrolled-\(name)")
-
-            // The pill's action: back to the newest row; the pill hides.
-            vm.scrollTranscriptToBottom()
-            XCTAssertTrue(waitUntil { !vm.showsQuestionWaitingPill }, "pill must hide at the bottom")
-            XCTAssertNotNil(questionCell(in: window))
             window.isHidden = true
         }
     }
