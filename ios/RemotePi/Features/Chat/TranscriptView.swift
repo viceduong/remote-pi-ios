@@ -11,6 +11,8 @@ struct TranscriptActions {
     var discardOffline: @MainActor (String) -> Void = { _ in }
     var fork: @MainActor (String) -> Void = { _ in }
     var selectText: @MainActor (String) -> Void = { _ in }
+    /// The inline question row (newest row) came on / went off screen.
+    var questionVisibilityChanged: @MainActor (Bool) -> Void = { _ in }
 }
 
 /// SwiftUI bridge for the UIKit transcript. Data does NOT flow through
@@ -27,6 +29,10 @@ struct TranscriptView: UIViewRepresentable {
         let view = TranscriptContainerView(style: TranscriptStyle(theme: theme, textScale: textScale,
                                                                   contentSize: contentSize))
         view.actions = actions
+        let vm = viewModel
+        view.questionContent = { question in
+            AnyView(QuestionCardView(viewModel: vm, question: question))
+        }
         view.bind(transcript: viewModel.transcript.eraseToAnyPublisher(),
                   scrollRequests: viewModel.scrollToBottomRequests.eraseToAnyPublisher())
         return view
@@ -61,6 +67,12 @@ struct TranscriptView: UIViewRepresentable {
  *   so contentSize is always exact.
  * - Auto-follow: pinned while at the bottom; otherwise the first visible
  *   stable row is anchored across updates (no yank, no jump).
+ * - The pending question (`.question`) is NOT a text row: it hosts the
+ *   SwiftUI card (`QuestionCell`), is measured ON MAIN with an offscreen
+ *   hosting controller (cached per question/style/width in `rows`), and is
+ *   only (re)configured when the question itself changes — the card reads
+ *   its interactive state from the view model, so typing/selecting never
+ *   reloads the row (a reload would drop the text field's focus).
  */
 final class TranscriptContainerView: UIView, UITableViewDelegate {
     let tableView = UITableView(frame: .zero, style: .plain)
@@ -95,6 +107,12 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
     /// land shortly afterwards, even mid-animation.
     private var pinUntil = Date.distantPast
     private static let initialChunk = 40
+    /// Builds the hosted question card (set by `TranscriptView`); nil → a
+    /// plain-text fallback.
+    var questionContent: (@MainActor (AgentQuestion) -> AnyView)?
+    /// Offscreen controller used only to measure the question card.
+    private lazy var measuringHost = UIHostingController(rootView: AnyView(EmptyView()))
+    private var lastQuestionVisible = false
 
     init(style: TranscriptStyle) {
         self.style = style
@@ -128,11 +146,26 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
         tableView.sectionHeaderTopPadding = 0
         tableView.keyboardDismissMode = .onDrag
         tableView.register(TranscriptCell.self, forCellReuseIdentifier: TranscriptCell.reuseId)
+        tableView.register(QuestionCell.self, forCellReuseIdentifier: QuestionCell.reuseId)
         tableView.delegate = self
         tableView.accessibilityLabel = "Conversation"
         addSubview(tableView)
 
+        // Typing in the inline question card: keep the focused field above
+        // the keyboard (the transcript itself shrinks with the keyboard).
+        NotificationCenter.default.addObserver(self, selector: #selector(keyboardDidShow(_:)),
+                                               name: UIResponder.keyboardDidShowNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(textDidBeginEditing(_:)),
+                                               name: UITextField.textDidBeginEditingNotification, object: nil)
+
         dataSource = UITableViewDiffableDataSource<Int, String>(tableView: tableView) { [weak self] table, indexPath, id in
+            if let self, let item = self.items[id], item.kind == .question {
+                let cell = table.dequeueReusableCell(withIdentifier: QuestionCell.reuseId, for: indexPath)
+                if let questionCell = cell as? QuestionCell {
+                    self.configureQuestion(questionCell, item: item)
+                }
+                return cell
+            }
             let cell = table.dequeueReusableCell(withIdentifier: TranscriptCell.reuseId, for: indexPath)
             if let self, let transcriptCell = cell as? TranscriptCell {
                 self.configure(transcriptCell, id: id)
@@ -267,6 +300,15 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
             // A newer batch arrived while rendering: skip this stale apply
             // (bodies stay in the shared cache, so the next pass is cheap).
             if !isInitialChunk, pendingItems != nil { continue }
+            // The question card is measured here, on main (SwiftUI), only
+            // when its question / width / style changed.
+            for item in batch where item.kind == .question {
+                let key = questionRenderKey(item)
+                if let existing = rows[item.id], existing.renderKey == key, existing.layout.width == width {
+                    continue
+                }
+                rendered[item.id] = measureQuestion(item, width: width, key: key)
+            }
             apply(batch, rendered: rendered)
         }
     }
@@ -282,6 +324,8 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
         forceRender.removeAll()
         var jobs: [TranscriptRenderer.Job] = []
         for item in batch {
+            // Hosted SwiftUI card: measured on main in `renderLoop`.
+            if item.kind == .question { continue }
             let isExpanded = expanded.contains(item.id)
             if !all, !forced.contains(item.id), let existing = rows[item.id], items[item.id] == item,
                existing.layout.width == width {
@@ -304,6 +348,10 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
             .union(batch.compactMap { item in
                 oldIds.contains(item.id) && items[item.id] != item ? item.id : nil
             })
+        // A NEW question card while following the bottom: show its top when
+        // it is taller than the viewport (the header + first question, not
+        // just the Submit row).
+        let newQuestionId = batch.last.flatMap { $0.kind == .question && !oldIds.contains($0.id) ? $0.id : nil }
         var anchor: Anchor?
         if let toggled = toggleAnchorId,
            rendered[toggled] != nil || !batch.contains(where: { $0.id == toggled }) {
@@ -350,6 +398,7 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
 
         if pinned {
             pinToBottom()
+            if let newQuestionId { revealTop(of: newQuestionId) }
         } else if let anchor {
             restore(anchor)
         }
@@ -372,6 +421,11 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
 
     /// Fallback only (should not happen: rows are rendered before apply).
     private func syncRender(_ item: TranscriptItem) -> RowRender {
+        if item.kind == .question {
+            let render = measureQuestion(item, width: currentWidth, key: questionRenderKey(item))
+            rows[item.id] = render
+            return render
+        }
         let isExpanded = expanded.contains(item.id)
         let key = TranscriptRenderer.renderKey(item, expanded: isExpanded, styleKey: style.key)
         let render = TranscriptRenderer.run(
@@ -379,6 +433,85 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
             width: tableView.bounds.width, style: style, cache: TranscriptBodyCache.shared)
         rows[item.id] = render
         return render
+    }
+
+    // MARK: Question row
+
+    /// Content identity of the question card (question + style). Width is
+    /// checked separately (`layout.width`).
+    private func questionRenderKey(_ item: TranscriptItem) -> String {
+        "question|\(item.actionId ?? item.id)|\(item.text.utf8.count)|\(item.text.hashValue)|\(style.key)"
+    }
+
+    private func questionCardView(_ item: TranscriptItem) -> AnyView {
+        if let question = item.question, let questionContent {
+            return questionContent(question)
+        }
+        return AnyView(Text(item.text).font(.subheadline).padding(12))
+    }
+
+    /// Exact height of the hosted card at `width` (main thread, SwiftUI).
+    /// Selections / typed text never change it (single-line field, fixed-size
+    /// selection glyphs), so it is measured once per question/width/style.
+    private func measureQuestion(_ item: TranscriptItem, width: CGFloat, key: String) -> RowRender {
+        var height: CGFloat = 44
+        if width > 0 {
+            measuringHost.rootView = QuestionRowContent.measuring(questionCardView(item), style: style, width: width)
+            let size = measuringHost.sizeThatFits(in: CGSize(width: width, height: .greatestFiniteMagnitude))
+            if size.height.isFinite, size.height > 0 { height = ceil(size.height) }
+            // Don't keep observing the view model from the offscreen copy.
+            measuringHost.rootView = AnyView(EmptyView())
+        }
+        var layout = RowLayout()
+        layout.width = width
+        layout.height = height
+        return RowRender(renderKey: key, body: NSAttributedString(), layout: layout,
+                         footerTitle: nil, isLong: false, segments: [])
+    }
+
+    private func configureQuestion(_ cell: QuestionCell, item: TranscriptItem) {
+        let key = rows[item.id]?.renderKey ?? questionRenderKey(item)
+        cell.configure(key: key) {
+            QuestionRowContent.display(questionCardView(item), style: style)
+        }
+    }
+
+    /// Scroll so the top of row `id` sits at the viewport's visual top when
+    /// the row is taller than the viewport.
+    private func revealTop(of id: String) {
+        guard let row = indexById[id], tableView.numberOfSections > 0,
+              row < tableView.numberOfRows(inSection: 0) else { return }
+        let rect = tableView.rectForRow(at: IndexPath(row: row, section: 0))
+        // Table space: the row's VISUAL top edge is its maxY.
+        let y = rect.maxY + TranscriptMetrics.vPad - tableView.bounds.height
+        guard y > bottomOffsetY else { return }
+        tableView.contentOffset = CGPoint(x: tableView.contentOffset.x, y: y)
+    }
+
+    @objc private func keyboardDidShow(_ note: Notification) {
+        revealFocusedQuestionInput(animated: true)
+    }
+
+    @objc private func textDidBeginEditing(_ note: Notification) {
+        guard let field = note.object as? UIView, field.isDescendant(of: tableView) else { return }
+        // After the focus change settles (the keyboard may already be up).
+        Task { @MainActor [weak self] in
+            self?.revealFocusedQuestionInput(animated: true)
+        }
+    }
+
+    /// Keep the card's focused text field visible above the keyboard.
+    private func revealFocusedQuestionInput(animated: Bool) {
+        guard window != nil else { return }
+        layoutIfNeeded()
+        for case let cell as QuestionCell in tableView.visibleCells {
+            guard let input = cell.focusedInput else { continue }
+            // `convert` applies both flips: the rect is in table (content)
+            // coordinates, which is what scrollRectToVisible works in.
+            let rect = input.convert(input.bounds, to: tableView).insetBy(dx: 0, dy: -12)
+            tableView.scrollRectToVisible(rect, animated: animated)
+            return
+        }
     }
 
     private func performRowAction(id: String) {
@@ -432,7 +565,9 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
                    point: CGPoint) -> UIContextMenuConfiguration? {
         guard indexPath.row < order.count else { return nil }
         let id = order[indexPath.row]
-        guard let item = items[id] else { return nil }
+        // The interactive question card has no context menu (long presses
+        // belong to its buttons / text field).
+        guard let item = items[id], item.kind != .question else { return nil }
         return UIContextMenuConfiguration(identifier: id as NSString, previewProvider: nil) { [weak self] _ in
             self?.menu(for: item)
         }
@@ -572,5 +707,20 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
             lastNearBottom = near
             actions.nearBottomChanged(near)
         }
+        let questionVisible = isQuestionRowVisible
+        if questionVisible != lastQuestionVisible {
+            lastQuestionVisible = questionVisible
+            actions.questionVisibilityChanged(questionVisible)
+        }
+    }
+
+    /// The newest row is the question card and at least part of it (44pt,
+    /// or all of a shorter row) is inside the viewport.
+    private var isQuestionRowVisible: Bool {
+        guard let first = order.first, items[first]?.kind == .question,
+              tableView.numberOfSections > 0, tableView.numberOfRows(inSection: 0) > 0 else { return false }
+        let rect = tableView.rectForRow(at: IndexPath(row: 0, section: 0))
+        let overlap = rect.intersection(tableView.bounds)
+        return !overlap.isNull && overlap.height >= min(44, rect.height)
     }
 }

@@ -32,6 +32,32 @@ extension XCTestCase {
         controller.view.layoutIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(settle))
         controller.view.layoutIfNeeded()
+        writeSnapshot(of: window, name: name)
+        window.isHidden = true
+    }
+
+    /// A visible window in the host app's scene (scene-less windows draw
+    /// blank), above the app's own UI.
+    func makeSnapshotWindow(size: CGSize = CGSize(width: 390, height: 844),
+                            root: UIViewController) -> UIWindow {
+        let window: UIWindow
+        if let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first {
+            window = UIWindow(windowScene: scene)
+        } else {
+            window = UIWindow()
+        }
+        window.frame = CGRect(origin: .zero, size: size)
+        window.rootViewController = root
+        window.windowLevel = .alert + 1
+        window.makeKeyAndVisible()
+        root.view.frame = window.bounds
+        root.view.layoutIfNeeded()
+        return window
+    }
+
+    /// Draw a live window as-is (attachment + PNG) — for multi-step tests
+    /// that keep one window and mutate state between snapshots.
+    func writeSnapshot(of window: UIWindow, name: String) {
         let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
             window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
         }
@@ -45,6 +71,5 @@ extension XCTestCase {
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             try? data.write(to: dir.appendingPathComponent("\(name).png"))
         }
-        window.isHidden = true
     }
 }

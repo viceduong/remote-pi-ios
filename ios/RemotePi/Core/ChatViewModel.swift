@@ -34,18 +34,25 @@ final class ChatViewModel: ObservableObject {
     @Published private(set) var connectionState: ConnectionState = .disconnected
     @Published private(set) var loadPhase: LoadPhase = .loading
     @Published private(set) var transcriptIsEmpty = true
-    /// Unanswered `ask_user_question` questionnaire (card above the composer).
-    /// Mirrored into the status reducer ("Waiting for your answer" even on
-    /// servers without §7 activity).
+    /// Unanswered `ask_user_question` questionnaire, shown INLINE as the
+    /// newest transcript row (`TranscriptItem.Kind.question`). Mirrored into
+    /// the status reducer ("Waiting for your answer" even on servers without
+    /// §7 activity).
     @Published private(set) var pendingQuestion: AgentQuestion? {
         didSet {
             if (oldValue == nil) != (pendingQuestion == nil) {
                 status.apply(.questionCard(pendingQuestion != nil))
             }
+            // The card is a transcript row: add/remove/replace it.
+            if oldValue != pendingQuestion { scheduleCommit() }
         }
     }
     @Published var questionSelections: [Int: Set<String>] = [:]
     @Published var questionText: [Int: String] = [:]
+    /// Transcript viewport state for the "Question waiting" pill: the user
+    /// is (not) near the bottom / the inline question row is (not) on screen.
+    @Published private(set) var viewportAtBottom = true
+    @Published private(set) var questionRowVisible = false
     @Published var errorMessage: String?
     @Published var infoMessage: String?
     /// Set after a successful fork — ChatView pops back to the session list.
@@ -244,6 +251,29 @@ final class ChatViewModel: ObservableObject {
 
     func setViewportNearBottom(_ value: Bool) {
         viewportNearBottom = value
+        // Reported from scroll callbacks that can run inside a SwiftUI update
+        // (layout) — publish on the next turn, never during a view update.
+        Task { @MainActor [weak self] in
+            guard let self, self.viewportAtBottom != value else { return }
+            self.viewportAtBottom = value
+        }
+    }
+
+    func setQuestionRowVisible(_ value: Bool) {
+        Task { @MainActor [weak self] in
+            guard let self, self.questionRowVisible != value else { return }
+            self.questionRowVisible = value
+        }
+    }
+
+    /// A question is pending but its inline card is scrolled out of view.
+    var showsQuestionWaitingPill: Bool {
+        pendingQuestion != nil && !viewportAtBottom && !questionRowVisible
+    }
+
+    /// Jump the transcript to the newest row (the "Question waiting" pill).
+    func scrollTranscriptToBottom() {
+        scrollToBottomRequests.send(())
     }
 
     func retryLoad() {
@@ -358,6 +388,12 @@ final class ChatViewModel: ObservableObject {
                 statusText: "waiting for connection", cancellable: true,
                 actionId: o.id.uuidString))
         }
+        // The pending questionnaire is ALWAYS the newest row (after messages,
+        // chips and offline rows); it disappears when resolved, and the Q&A
+        // row from the tool result takes over.
+        if let question = pendingQuestion {
+            items.append(ChatViewModel.questionItem(question))
+        }
 
         if items != lastPublished {
             lastPublished = items
@@ -388,6 +424,12 @@ final class ChatViewModel: ObservableObject {
             return TranscriptItem(id: m.id, kind: .assistant, text: m.text, entryId: m.entryId,
                                   streaming: streaming)
         }
+    }
+
+    /// Transcript row for the pending questionnaire (stable id per request).
+    nonisolated static func questionItem(_ question: AgentQuestion) -> TranscriptItem {
+        TranscriptItem(id: "question:" + question.requestId, kind: .question,
+                       text: question.copyText, actionId: question.requestId, question: question)
     }
 
     /// A chip can be cancelled / steered only when it is a still-`queued`

@@ -368,6 +368,17 @@ struct AgentQuestion: Equatable, Identifiable {
     }
 
     var id: String { requestId }
+
+    /// Plain-text copy of the questionnaire (questions + option labels).
+    var copyText: String {
+        items.map { item in
+            var lines = [item.question]
+            for option in item.options {
+                lines.append("• " + option.label + (option.description.isEmpty ? "" : " — " + option.description))
+            }
+            return lines.joined(separator: "\n")
+        }.joined(separator: "\n\n")
+    }
 }
 
 /// Cumulative provider usage from pi 0.85 `message_update.usage`.

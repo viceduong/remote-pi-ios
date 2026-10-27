@@ -25,8 +25,14 @@ struct TranscriptStyle {
     let chipTint: UIColor
     let chipBackground: UIColor
     let offlineBackground: UIColor
+    /// The SwiftUI theme + size category, for rows hosting SwiftUI content
+    /// (the inline question card lives outside the SwiftUI environment).
+    let theme: AppTheme
+    let contentSize: UIContentSizeCategory
 
     init(theme: AppTheme, textScale: Double, contentSize: UIContentSizeCategory) {
+        self.theme = theme
+        self.contentSize = contentSize
         let traits = UITraitCollection(preferredContentSizeCategory: contentSize)
         // Dynamic Type × the in-app text-size setting.
         let bodySize = UIFontMetrics(forTextStyle: .body)
@@ -168,6 +174,9 @@ enum TranscriptRenderer {
             return MarkdownRenderer.plain(item.text, font: style.bodyFont, color: style.text)
         case .qa:
             return qaBody(item, style: style)
+        case .question:
+            // Hosted SwiftUI card (measured on main by the container).
+            return NSAttributedString()
         }
     }
 
@@ -323,6 +332,9 @@ enum TranscriptRenderer {
             l.drawWidth = maxText
             l.chunks = place(chunks, in: l.text)
             l.height = l.bubble.maxY + M.vPad
+        case .question:
+            // Never laid out here: the container measures the hosted card.
+            l.height = 0
         }
         return l
     }

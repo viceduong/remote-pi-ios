@@ -37,11 +37,11 @@ struct ChatView: View {
         VStack(spacing: 0) {
             HostOwnershipBanner(status: viewModel.status, client: client, sessionId: session.id,
                                 initialLive: session.live == true, initialPid: session.livePid)
-            TranscriptView(viewModel: viewModel,
-                           theme: theme,
-                           textScale: textScale,
-                           contentSize: dynamicTypeSize.uiContentSizeCategory,
-                           actions: transcriptActions)
+            ChatTranscriptArea(viewModel: viewModel,
+                               theme: theme,
+                               textScale: textScale,
+                               contentSize: dynamicTypeSize.uiContentSizeCategory,
+                               actions: transcriptActions)
                 .overlay { loadingOverlay }
         }
         // Composer + status bars live in the bottom safe-area inset: they stay
@@ -124,7 +124,8 @@ struct ChatView: View {
                 if let uuid = UUID(uuidString: id) { vm.discardOffline(uuid) }
             },
             fork: { entryId in vm.requestFork(entryId: entryId, name: forkName) },
-            selectText: { text in selection.wrappedValue = SelectableText(text: text) }
+            selectText: { text in selection.wrappedValue = SelectableText(text: text) },
+            questionVisibilityChanged: { vm.setQuestionRowVisible($0) }
         )
     }
 
@@ -175,8 +176,70 @@ struct ChatView: View {
     }
 }
 
-// MARK: - Bottom bar (question card, status banner, queue note, stats, composer)
+// MARK: - Transcript area (UIKit transcript + "Question waiting" pill)
 
+/// The transcript plus the non-blocking "Question waiting" pill shown above
+/// the composer while a question is pending and its inline card (the newest
+/// transcript row) is scrolled out of view. Shared by `ChatView` and tests.
+struct ChatTranscriptArea: View {
+    @ObservedObject var viewModel: ChatViewModel
+    let theme: AppTheme
+    let textScale: Double
+    let contentSize: UIContentSizeCategory
+    let actions: TranscriptActions
+
+    var body: some View {
+        TranscriptView(viewModel: viewModel,
+                       theme: theme,
+                       textScale: textScale,
+                       contentSize: contentSize,
+                       actions: actions)
+            .overlay(alignment: .bottom) {
+                if viewModel.showsQuestionWaitingPill {
+                    QuestionWaitingPill {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        viewModel.scrollTranscriptToBottom()
+                    }
+                    .padding(.bottom, 10)
+                }
+            }
+    }
+}
+
+/// Small capsule that jumps to the pending question card.
+struct QuestionWaitingPill: View {
+    let action: () -> Void
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "questionmark.circle.fill")
+                    .font(.caption.weight(.semibold))
+                Text("Question waiting")
+                    .font(.caption.weight(.semibold))
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.bold))
+            }
+            .foregroundColor(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(Capsule().fill(theme.accent))
+            .shadow(color: Color.black.opacity(0.2), radius: 4, x: 0, y: 2)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Question waiting")
+        .accessibilityHint("Scrolls to the agent's question")
+        .accessibilityAddTraits(.isButton)
+    }
+}
+
+// MARK: - Bottom bar (status banner, stats, composer)
+
+/// The pending question is NOT shown here: it is an inline transcript row
+/// (`QuestionCell`), so the composer stays fully usable while it waits.
 struct ChatBottomBar: View {
     @ObservedObject var viewModel: ChatViewModel
     @ObservedObject var status: ChatLiveStatus
@@ -184,9 +247,6 @@ struct ChatBottomBar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if let question = viewModel.pendingQuestion {
-                QuestionCardView(viewModel: viewModel, question: question)
-            }
             if let work = status.workingText {
                 WorkingBanner(text: work, kind: status.activityKind, since: status.activitySince)
             }
@@ -413,79 +473,47 @@ struct ElapsedLabel: View {
     }
 }
 
-/// Ask-user-question card (contract §8): renders the pending questionnaire
-/// above the composer — single/multi select, option descriptions and
-/// previews, optional typed answer. The questions area is sized to its
-/// content up to ~60% of the space above the keyboard and scrolls beyond
-/// that; Submit / "Chat about this" stay pinned at the card bottom.
+/// Ask-user-question card (contract §8), shown INLINE as the newest
+/// transcript row (hosted by `QuestionCell`): single/multi select, option
+/// descriptions and previews, optional typed answer, Submit / "Chat about
+/// this" / Cancel. It renders at its natural height and scrolls with the
+/// conversation (no inner scroll view, no height cap).
+///
+/// Its height must NOT depend on interactive state (the table uses exact,
+/// precomputed row heights and reloading the row would drop the text
+/// field's focus): the typed-answer fields stay single-line, selection
+/// glyphs have a fixed frame, and errors surface as alerts, not inline text.
 struct QuestionCardView: View {
     @ObservedObject var viewModel: ChatViewModel
     let question: AgentQuestion
     @Environment(\.theme) private var theme
-    @State private var contentHeight: CGFloat = 0
-    @State private var keyboardHeight: CGFloat = 0
-
-    /// Header + footer + paddings around the questions area.
-    private static let chromeHeight: CGFloat = 104
+    /// Selection glyph box (scales with Dynamic Type, never with selection).
+    @ScaledMetric(relativeTo: .body) private var glyphSize: CGFloat = 20
 
     private var isComplete: Bool {
         ChatViewModel.isComplete(question, selections: viewModel.questionSelections,
                                  text: viewModel.questionText)
     }
 
-    private var scrollCap: CGFloat {
-        let available = max(0, UIScreen.main.bounds.height - keyboardHeight)
-        return max(96, available * 0.6 - Self.chromeHeight)
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             header
-            questionsArea
+            VStack(alignment: .leading, spacing: 16) {
+                ForEach(Array(question.items.enumerated()), id: \.element.id) { position, item in
+                    section(item, position: position)
+                }
+            }
+            .padding(.vertical, 2)
             footer
         }
         .padding(12)
-        .background(theme.secondaryBackground.opacity(0.6))
-        .overlay(Rectangle().frame(height: 1).foregroundColor(theme.accent.opacity(0.25)),
-                 alignment: .top)
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
-            guard let frame = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue else {
-                return
-            }
-            keyboardHeight = max(0, UIScreen.main.bounds.height - frame.minY)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
-            keyboardHeight = 0
-        }
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(theme.secondaryBackground))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .strokeBorder(theme.accent.opacity(0.35), lineWidth: 1))
+        .padding(.horizontal, TranscriptMetrics.hPad)
+        .padding(.vertical, TranscriptMetrics.vPad)
         .accessibilityElement(children: .contain)
-    }
-
-    /// The questions render at their NATURAL height and only become a bounded,
-    /// scrollable region once they would exceed `scrollCap`. Crucially, until
-    /// the content is measured (`contentHeight == 0`) the natural branch is
-    /// used, so on first appearance the questions are always fully laid out —
-    /// never trapped at ~1pt. (A fixed-height `ScrollView` seeded from a 0/1
-    /// `@State` + `onPreferenceChange` frequently never settles on iOS 15, so
-    /// the card would show only its header + footer with no visible content.)
-    @ViewBuilder
-    private var questionsArea: some View {
-        let questions = VStack(alignment: .leading, spacing: 16) {
-            ForEach(Array(question.items.enumerated()), id: \.element.id) { position, item in
-                section(item, position: position)
-            }
-        }
-        .padding(.vertical, 2)
-        .background(GeometryReader { proxy in
-            Color.clear.preference(key: QuestionCardHeightKey.self, value: proxy.size.height)
-        })
-        .onPreferenceChange(QuestionCardHeightKey.self) { contentHeight = $0 }
-
-        if contentHeight > scrollCap {
-            ScrollView { questions }
-                .frame(height: scrollCap)
-        } else {
-            questions
-        }
     }
 
     private var header: some View {
@@ -531,9 +559,10 @@ struct QuestionCardView: View {
             }
             TextField(placeholder(for: item), text: typedBinding(for: item))
                 .font(.caption)
+                .lineLimit(1)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
-                .background(theme.secondaryBackground)
+                .background(theme.background)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .accessibilityLabel(item.multiSelect ? "Note for question \(position + 1)"
                                                      : "Typed answer for question \(position + 1)")
@@ -571,7 +600,7 @@ struct QuestionCardView: View {
                     .foregroundColor(theme.secondaryText)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 9)
-                    .background(theme.secondaryBackground)
+                    .background(theme.background)
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
             .accessibilityHint("Skips the questions so you can reply in the chat")
@@ -611,6 +640,9 @@ struct QuestionCardView: View {
                           ? (item.multiSelect ? "checkmark.square.fill" : "largecircle.fill.circle")
                           : (item.multiSelect ? "square" : "circle"))
                         .foregroundColor(isSelected ? theme.accent : theme.secondaryText)
+                        // Fixed glyph box: selecting never changes the
+                        // card's height (the row height is precomputed).
+                        .frame(width: glyphSize, height: glyphSize)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(option.label)
                             .font(.caption.weight(.semibold))
@@ -683,18 +715,11 @@ struct QuestionPreviewBlock: View {
         }
         .frame(height: min(Self.maxHeight, naturalHeight))
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(theme.secondaryBackground)
+        .background(theme.background)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Preview")
         .accessibilityValue(text)
-    }
-}
-
-private struct QuestionCardHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
     }
 }
 

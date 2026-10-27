@@ -57,6 +57,10 @@ struct TranscriptItem: Equatable {
         case user, assistant, error, queued, offline
         /// Answered/declined `ask_user_question` (contract §9).
         case qa
+        /// The PENDING `ask_user_question` card (contract §8): always the
+        /// newest row while unanswered; hosts the interactive SwiftUI card
+        /// (not a text row — never rendered/segmented by `TranscriptRenderer`).
+        case question
     }
 
     var id: String
@@ -75,6 +79,9 @@ struct TranscriptItem: Equatable {
     var actionId: String? = nil
     /// Q&A rows: the structured questions/answers (`text` is the copy text).
     var qa: QAInfo? = nil
+    /// Pending question rows: the questionnaire shown by the inline card
+    /// (`text` is a plain copy of the questions; `actionId` the requestId).
+    var question: AgentQuestion? = nil
 }
 
 // MARK: - Queue chip reconciliation (one chip per logical message)

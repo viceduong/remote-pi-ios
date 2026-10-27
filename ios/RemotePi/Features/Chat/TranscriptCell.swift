@@ -189,6 +189,11 @@ final class TranscriptCell: UITableViewCell {
             accessibilityText = item.qa?.cancelled == true
                 ? "Question declined"
                 : "Question answered. " + item.text
+        case .question:
+            // Hosted by `QuestionCell`; never configured here.
+            bubbleColor = .clear
+            bubbleCorner = 0
+            accessibilityText = "Agent question. " + item.text
         }
         bubble.backgroundColor = bubbleColor
         bubble.layer.cornerRadius = bubbleCorner
