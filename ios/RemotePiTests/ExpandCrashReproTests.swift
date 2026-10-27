@@ -40,6 +40,38 @@ final class ExpandCrashReproTests: XCTestCase {
         RunLoop.main.run(until: Date().addingTimeInterval(seconds))
     }
 
+    /// Current physical footprint (what jetsam limits), in MB.
+    private static func footprintMB() -> Double {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let kr = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return kr == KERN_SUCCESS ? Double(info.phys_footprint) / 1_048_576 : -1
+    }
+
+    /// Spin until `condition` holds (or timeout), sampling peak footprint.
+    @discardableResult
+    private func wait(_ label: String, timeout: TimeInterval, _ condition: () -> Bool) -> (ok: Bool, seconds: Double, peakMB: Double) {
+        let start = Date()
+        var peak = Self.footprintMB()
+        var maxStall: Double = 0
+        while Date().timeIntervalSince(start) < timeout {
+            if condition() { break }
+            let tick = Date()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            maxStall = max(maxStall, Date().timeIntervalSince(tick))
+            peak = max(peak, Self.footprintMB())
+        }
+        NSLog("[repro] %@: longest main-thread stall %.2fs", label, maxStall)
+        let ok = condition()
+        let secs = Date().timeIntervalSince(start)
+        NSLog("[repro] \(label): ok=\(ok) t=\(String(format: "%.2f", secs))s peak=\(Int(peak))MB")
+        return (ok, secs, peak)
+    }
+
     private func footerButtons() -> [UIButton] {
         func walk(_ v: UIView) -> [UIButton] {
             var out: [UIButton] = []
@@ -64,15 +96,17 @@ final class ExpandCrashReproTests: XCTestCase {
     /// Expand → collapse → expand, scroll through, for one body shape.
     private func exercise(_ label: String, text: String) {
         subject.send(items(userText: text))
-        spin(1.0)
+        NSLog("[repro] \(label): base footprint=\(Int(Self.footprintMB()))MB")
+        wait("\(label) collapsed render", timeout: 60) { !footerButtons().isEmpty }
         guard let button = footerButtons().first else {
             return XCTFail("\(label): no 'Show all' footer rendered")
         }
         NSLog("[repro] \(label): tapping '\(button.title(for: .normal) ?? "")'")
         button.sendActions(for: .touchUpInside)
-        spin(1.5)
-        XCTAssertTrue(footerButtons().contains { $0.title(for: .normal)?.contains("Show less") == true },
-                      "\(label): row did not expand")
+        let expanded = wait("\(label) expand", timeout: 120) {
+            footerButtons().contains { $0.title(for: .normal)?.contains("Show less") == true }
+        }
+        XCTAssertTrue(expanded.ok, "\(label): row did not expand")
         // Scroll the whole expanded row through the viewport (segments churn).
         let table = transcript.tableView
         let maxY = max(0, table.contentSize.height - table.bounds.height)
@@ -82,7 +116,7 @@ final class ExpandCrashReproTests: XCTestCase {
             table.setContentOffset(CGPoint(x: 0, y: y), animated: false)
             spin(0.02)
         }
-        NSLog("[repro] \(label): expanded height=\(table.contentSize.height)")
+        NSLog("[repro] \(label): expanded height=\(table.contentSize.height) footprint=\(Int(Self.footprintMB()))MB")
         footerButtons().first?.sendActions(for: .touchUpInside)
         spin(1.0)
         footerButtons().first?.sendActions(for: .touchUpInside)
