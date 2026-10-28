@@ -567,7 +567,7 @@ final class ChatViewModel: ObservableObject {
             if isDelta {
                 // Empty delta = nothing new: a successful no-op.
                 guard !page.messages.isEmpty else { return }
-                ChatMerger.merge(&messages, rows)
+                ChatMerger.merge(&messages, rows, placement: .tail)
             } else {
                 ChatMerger.replaceTail(&messages, with: rows)
                 hasMore = page.hasMore
@@ -1441,7 +1441,7 @@ final class ChatViewModel: ObservableObject {
             self.fileFlushTask = nil
             let batch = self.pendingFileMessages
             self.pendingFileMessages = []
-            ChatMerger.merge(&self.messages, batch)
+            ChatMerger.merge(&self.messages, batch, placement: .tail)
             self.evictLiveTailIfNeeded()
         }
     }
@@ -1464,13 +1464,13 @@ final class ChatViewModel: ObservableObject {
 
     private func upsertUserEcho(_ mapped: ChatMessage) {
         guard mapped.text.hasVisibleCharacters else { return }
-        ChatMerger.merge(&messages, [mapped])
+        ChatMerger.merge(&messages, [mapped], placement: .tail)
     }
 
     /// Q&A rows (contract §9) arrive on message_start AND message_end (and
     /// later file_update / history) — identity-merged into one row.
     private func upsertQA(_ mapped: ChatMessage) {
-        ChatMerger.merge(&messages, [mapped])
+        ChatMerger.merge(&messages, [mapped], placement: .tail)
     }
 
     /// The `ask_user_question` result as a Q&A row when the server attached
@@ -1533,7 +1533,7 @@ final class ChatViewModel: ObservableObject {
         } else if let i = eIdx ?? sIdx {
             messages[i] = ChatMerger.absorb(messages[i], mapped)
         } else {
-            ChatMerger.merge(&messages, [mapped])
+            ChatMerger.merge(&messages, [mapped], placement: .tail)
         }
         streamingId = nil
     }

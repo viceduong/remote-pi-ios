@@ -87,8 +87,22 @@ enum ChatMerger {
         return existing.firstIndex(where: { ($0.timestamp ?? Int.max) > ts }) ?? existing.count
     }
 
+    /// Where an unmatched incoming row goes when nothing anchors it.
+    enum Placement {
+        /// Live / delta sources (SSE echoes, file tail, cursor refresh): the
+        /// rows are the NEWEST in server order, so they go at the tail (before
+        /// the streaming bubble). Timestamps can't be used: pi stamps a
+        /// steered user message when it is QUEUED, but appends it after the
+        /// assistant/tool rows produced while it waited — timestamp insertion
+        /// put it ABOVE the agent's latest messages.
+        case tail
+        /// Out-of-band slices (older pages): place by timestamp.
+        case timestamp
+    }
+
     /// Merge an ordered server slice (delta, page, echo batch) into `existing`.
-    static func merge(_ existing: inout [ChatMessage], _ incoming: [ChatMessage]) {
+    static func merge(_ existing: inout [ChatMessage], _ incoming: [ChatMessage],
+                      placement: Placement = .timestamp) {
         guard !incoming.isEmpty else { return }
         var cursor: Int?
         var seenEntries = Set<String>()
@@ -101,7 +115,9 @@ enum ChatMerger {
                 cursor = max(cursor ?? 0, idx + 1)
                 continue
             }
-            var at = cursor ?? timestampInsertionIndex(for: m, in: existing)
+            var at = cursor ?? (placement == .tail
+                ? (existing.firstIndex(where: isFloating) ?? existing.count)
+                : timestampInsertionIndex(for: m, in: existing))
             // Never insert below the floating streaming bubble.
             if let floating = existing.firstIndex(where: isFloating), at > floating { at = floating }
             at = min(max(at, 0), existing.count)

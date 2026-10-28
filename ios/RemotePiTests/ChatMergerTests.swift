@@ -10,6 +10,45 @@ final class ChatMergerTests: XCTestCase {
                     model: nil, errorMessage: nil, timestamp: ts)
     }
 
+    // MARK: - Steered messages keep server order (device report)
+
+    /// pi stamps a steered user message when it is QUEUED but appends it
+    /// after the rows produced while it waited. Live sources must keep arrival
+    /// (server) order, not move it above the agent's latest messages.
+    func testLiveSteeredUserEchoWithOlderTimestampGoesToTail() {
+        var list = [
+            msg(entryId: "a1", text: "working on it", ts: 1_000),
+            msg(entryId: "a2", text: "still digging, found the cause", ts: 5_000),
+        ]
+        let echo = msg(role: .user, text: "also check the logs", ts: 2_000, cid: "c1")
+        ChatMerger.merge(&list, [echo], placement: .tail)
+        XCTAssertEqual(list.map(\.text), ["working on it", "still digging, found the cause", "also check the logs"])
+    }
+
+    func testFileTailBatchWithSteeredUserRowKeepsServerOrder() {
+        var list = [msg(entryId: "a1", text: "step one", ts: 1_000)]
+        let batch = [
+            msg(entryId: "a2", text: "step two", ts: 6_000),
+            msg(entryId: "u1", role: .user, text: "steer: stop after this", ts: 3_000),
+            msg(entryId: "a3", text: "ok, stopping", ts: 7_000),
+        ]
+        ChatMerger.merge(&list, batch, placement: .tail)
+        XCTAssertEqual(list.map(\.entryId), ["a1", "a2", "u1", "a3"])
+    }
+
+    func testTailPlacementStaysAboveStreamingBubble() {
+        var list = [msg(entryId: "a1", text: "done", ts: 1_000),
+                    msg(text: "streaming…", ts: nil)]
+        ChatMerger.merge(&list, [msg(role: .user, text: "next", ts: 500)], placement: .tail)
+        XCTAssertEqual(list.map(\.text), ["done", "next", "streaming…"])
+    }
+
+    func testOlderPageStillPlacedByTimestamp() {
+        var list = [msg(entryId: "a5", text: "recent", ts: 9_000)]
+        ChatMerger.merge(&list, [msg(entryId: "a1", text: "old", ts: 1_000)])
+        XCTAssertEqual(list.map(\.entryId), ["a1", "a5"])
+    }
+
     // MARK: - Legacy behaviour (kept)
 
     func testAppendsNewMessages() {
