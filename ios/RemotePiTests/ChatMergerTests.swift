@@ -223,15 +223,43 @@ final class ChatMergerTests: XCTestCase {
             msg(text: "streaming", ts: nil),
         ]
         let e1Id = list[1].id
+        let streamingId = list[3].id
         ChatMerger.replaceTail(&list, with: [msg(entryId: "e1", text: "one", ts: 100),
-                                              msg(entryId: "e3", text: "three", ts: 300)])
+                                              msg(entryId: "e3", text: "three", ts: 300)],
+                               keeping: streamingId)
         XCTAssertEqual(list.map(\.text), ["old", "one", "three", "streaming"])
         XCTAssertEqual(list[1].id, e1Id)
     }
 
-    func testReplaceTailWithEmptyPageKeepsOnlyFloatingRows() {
+    func testReplaceTailWithEmptyPageKeepsOnlyTheStreamingBubble() {
         var list = [msg(entryId: "e1", text: "one", ts: 100), msg(text: "streaming", ts: nil)]
-        ChatMerger.replaceTail(&list, with: [])
+        ChatMerger.replaceTail(&list, with: [], keeping: list[1].id)
         XCTAssertEqual(list.map(\.text), ["streaming"])
+    }
+
+    // MARK: - Orphan stream bubbles (device report: "-op didn't help…" kept reappearing)
+
+    private let orphanText = "-op didn't help. Let me find the real sign-out trigger:"
+
+    func testReloadDropsOrphanFloatingBubble() {
+        var list = [msg(entryId: "e1", text: "one", ts: 100), msg(text: orphanText, ts: nil)]
+        ChatMerger.replaceTail(&list, with: [msg(entryId: "e1", text: "one", ts: 100),
+                                             msg(entryId: "e2", text: "newer reply", ts: 200)])
+        XCTAssertEqual(list.map(\.text), ["one", "newer reply"], "a non-streaming floating row must not survive a reload")
+    }
+
+    func testDropOrphanBubblesKeepsOnlyTheLiveBubble() {
+        let live = msg(text: "typing now", ts: nil)
+        var list = [msg(entryId: "e1", text: "one", ts: 100), msg(text: orphanText, ts: nil),
+                    msg(role: .user, text: "local user row", ts: nil), live]
+        ChatMerger.dropOrphanBubbles(&list, streamingId: live.id)
+        XCTAssertEqual(list.map(\.text), ["one", "local user row", "typing now"])
+    }
+
+    func testNewRowsNoLongerLandAboveAnOrphanOnceItIsDropped() {
+        var list = [msg(entryId: "e1", text: "one", ts: 100), msg(text: orphanText, ts: nil)]
+        ChatMerger.dropOrphanBubbles(&list, streamingId: nil)
+        ChatMerger.merge(&list, [msg(role: .user, text: "my new message", ts: 300, cid: "c1")], placement: .tail)
+        XCTAssertEqual(list.last?.text, "my new message")
     }
 }

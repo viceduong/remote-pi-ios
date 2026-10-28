@@ -183,6 +183,8 @@ final class ChatViewModel: ObservableObject {
            let snap = await SessionHistoryCache.shared.load(sessionId: sessionId),
            ChatMessage.hasVisibleContent(snap.messages) {
             messages = snap.messages
+            // Older builds cached orphan stream bubbles; never resurrect them.
+            ChatMerger.dropOrphanBubbles(&messages, streamingId: nil)
             hasMore = snap.hasMore
             lastSeenEntryId = snap.cursor
             loadPhase = .loaded
@@ -481,8 +483,8 @@ final class ChatViewModel: ObservableObject {
 
     private func cacheableMessages() -> [ChatMessage] {
         let tail = messages.suffix(SessionHistoryCache.maxMessages)
-        guard let sid = streamingId else { return Array(tail) }
-        return tail.filter { $0.id != sid }
+        // Never persist the streaming bubble or any floating (orphan) row.
+        return tail.filter { $0.id != streamingId && !ChatMerger.isFloating($0) }
     }
 
     /// Debounced (2s after the last change), content-gated, written off-main
@@ -1512,6 +1514,7 @@ final class ChatViewModel: ObservableObject {
             }
             streamingId = nil
         }
+        ChatMerger.dropOrphanBubbles(&messages, streamingId: nil)
         if let eid = mapped.entryId, let i = messages.lastIndex(where: { $0.entryId == eid }) {
             streamingId = messages[i].id
             return
@@ -1539,6 +1542,7 @@ final class ChatViewModel: ObservableObject {
         }
         streamingId = nil
         ChatMerger.pruneFragments(&messages, keep: nil)
+        ChatMerger.dropOrphanBubbles(&messages, streamingId: nil)
     }
 
     /// Batch streamed text deltas: append to a buffer, flush ~90ms later.

@@ -51,6 +51,16 @@ enum ChatMerger {
         return false
     }
 
+    /// Remove floating rows (no entry id, no timestamp) other than the live
+    /// streaming bubble. Such a row is created when stream deltas arrive
+    /// without their message_start; once it is not streaming it is an orphan:
+    /// it stays pinned at the tail (new rows insert above floating rows), is
+    /// kept by reloads and cached — so it reappears under every new reply.
+    /// Its text is part of a real message the server history provides.
+    static func dropOrphanBubbles(_ existing: inout [ChatMessage], streamingId: String?) {
+        existing.removeAll { isFloating($0) && $0.role == .assistant && $0.id != streamingId }
+    }
+
     /// `local` is a not-yet-confirmed assistant bubble (no entry id) whose
     /// text appears inside `canonical`'s text (at least 10 characters).
     static func isUnconfirmedFragment(_ local: ChatMessage, of canonical: ChatMessage) -> Bool {
@@ -208,8 +218,13 @@ enum ChatMerger {
         // it is not in the server history yet, and its timestamp (the message
         // start) can be older than the page's newest row — dropping it made
         // the next deltas start a new bubble mid-sentence.
+        // A row with neither entry id nor timestamp is only legitimate while it
+        // IS the streaming bubble; any other one is an orphan left by a broken
+        // stream and must not survive (it would sit at the tail forever).
         result.append(contentsOf: identityLess.filter {
-            $0.id == streamingId || ($0.timestamp ?? Int.max) >= (newest ?? Int.min)
+            if $0.id == streamingId { return true }
+            guard let ts = $0.timestamp else { return false }
+            return ts >= (newest ?? Int.min)
         })
         existing = result
         pruneFragments(&existing, keep: streamingId)
