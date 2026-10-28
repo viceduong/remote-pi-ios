@@ -45,7 +45,36 @@ enum ChatMerger {
            rn.hasPrefix(ln) || ln.hasPrefix(rn) {
             return true
         }
+        // A bubble that started mid-message (its first deltas were lost, e.g.
+        // across a stream reset) is a suffix/infix of the canonical copy.
+        if isUnconfirmedFragment(local, of: incoming) { return true }
         return false
+    }
+
+    /// `local` is a not-yet-confirmed assistant bubble (no entry id) whose
+    /// text appears inside `canonical`'s text (at least 10 characters).
+    static func isUnconfirmedFragment(_ local: ChatMessage, of canonical: ChatMessage) -> Bool {
+        guard local.role == .assistant, canonical.role == .assistant,
+              local.entryId == nil, local.qa == nil else { return false }
+        let fragment = TextNormalizer.normalize(local.text)
+        let full = TextNormalizer.normalize(canonical.text)
+        guard fragment.count >= 10, full.count > fragment.count else { return false }
+        return full.contains(fragment)
+    }
+
+    /// Drop unconfirmed assistant bubbles (other than `keep`) whose text is
+    /// contained in a confirmed assistant row — leftovers of a stream that
+    /// lost its start or end. Never touches rows with an entry id.
+    /// Only the most recent confirmed replies are candidates, so a new short
+    /// reply that happens to repeat a phrase of an old message is never hit.
+    static func pruneFragments(_ existing: inout [ChatMessage], keep: String?) {
+        let confirmed = Array(existing.filter {
+            $0.role == .assistant && $0.entryId != nil && $0.text.hasVisibleCharacters
+        }.suffix(3))
+        guard !confirmed.isEmpty else { return }
+        existing.removeAll { row in
+            row.id != keep && confirmed.contains { isUnconfirmedFragment(row, of: $0) }
+        }
     }
 
     /// Index of the existing row representing `m`, if any.
@@ -136,7 +165,8 @@ enum ChatMerger {
     /// Older local rows outside the page's range are kept; local rows inside
     /// the range that the server no longer has are dropped; the floating
     /// streaming bubble is preserved. Row ids are preserved for matches.
-    static func replaceTail(_ existing: inout [ChatMessage], with page: [ChatMessage]) {
+    static func replaceTail(_ existing: inout [ChatMessage], with page: [ChatMessage],
+                            keeping streamingId: String? = nil) {
         var deduped: [ChatMessage] = []
         deduped.reserveCapacity(page.count)
         var seen = Set<String>()
@@ -174,8 +204,14 @@ enum ChatMerger {
             result.append(p)
         }
         // Keep unconfirmed local rows that are newer than the page (or have
-        // no timestamp at all — the streaming bubble).
-        result.append(contentsOf: identityLess.filter { ($0.timestamp ?? Int.max) >= (newest ?? Int.min) })
+        // no timestamp at all), and ALWAYS the bubble that is still streaming:
+        // it is not in the server history yet, and its timestamp (the message
+        // start) can be older than the page's newest row — dropping it made
+        // the next deltas start a new bubble mid-sentence.
+        result.append(contentsOf: identityLess.filter {
+            $0.id == streamingId || ($0.timestamp ?? Int.max) >= (newest ?? Int.min)
+        })
         existing = result
+        pruneFragments(&existing, keep: streamingId)
     }
 }

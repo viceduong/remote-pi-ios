@@ -568,8 +568,9 @@ final class ChatViewModel: ObservableObject {
                 // Empty delta = nothing new: a successful no-op.
                 guard !page.messages.isEmpty else { return }
                 ChatMerger.merge(&messages, rows, placement: .tail)
+                ChatMerger.pruneFragments(&messages, keep: streamingId)
             } else {
-                ChatMerger.replaceTail(&messages, with: rows)
+                ChatMerger.replaceTail(&messages, with: rows, keeping: streamingId)
                 hasMore = page.hasMore
                 noteLowest(page.messages)
                 if loadPhase != .loaded { loadPhase = .loaded }
@@ -591,7 +592,7 @@ final class ChatViewModel: ObservableObject {
                 let page = try await self.client.fetchMessages(self.sessionId, limit: 100)
                 guard self.lifecycleActive, !Task.isCancelled else { return }
                 self.flushPendingDelta()
-                ChatMerger.replaceTail(&self.messages, with: ChatViewModel.displayable(page.messages))
+                ChatMerger.replaceTail(&self.messages, with: ChatViewModel.displayable(page.messages), keeping: self.streamingId)
                 self.hasMore = page.hasMore
                 self.noteLowest(page.messages)
                 self.advanceCursor(page.messages)
@@ -617,7 +618,7 @@ final class ChatViewModel: ObservableObject {
         do {
             let page = try await client.fetchMessages(sessionId, limit: 100)
             guard lifecycleActive else { return }
-            ChatMerger.replaceTail(&messages, with: ChatViewModel.displayable(page.messages))
+            ChatMerger.replaceTail(&messages, with: ChatViewModel.displayable(page.messages), keeping: streamingId)
             hasMore = page.hasMore
             noteLowest(page.messages)
             advanceCursor(page.messages)
@@ -1442,6 +1443,7 @@ final class ChatViewModel: ObservableObject {
             let batch = self.pendingFileMessages
             self.pendingFileMessages = []
             ChatMerger.merge(&self.messages, batch, placement: .tail)
+            ChatMerger.pruneFragments(&self.messages, keep: self.streamingId)
             self.evictLiveTailIfNeeded()
         }
     }
@@ -1536,6 +1538,7 @@ final class ChatViewModel: ObservableObject {
             ChatMerger.merge(&messages, [mapped], placement: .tail)
         }
         streamingId = nil
+        ChatMerger.pruneFragments(&messages, keep: nil)
     }
 
     /// Batch streamed text deltas: append to a buffer, flush ~90ms later.

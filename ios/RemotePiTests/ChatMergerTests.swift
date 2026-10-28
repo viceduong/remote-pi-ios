@@ -49,6 +49,45 @@ final class ChatMergerTests: XCTestCase {
         XCTAssertEqual(list.map(\.entryId), ["a1", "a5"])
     }
 
+    // MARK: - Mid-message fragments (device report: "-op didn't help. Let me find…")
+
+    private let fullReply = "Still signing out! The `logout()` no-op didn't help. Let me find the real sign-out trigger:"
+
+    func testFragmentMissingItsStartIsReplacedByCanonicalCopy() {
+        var list = [msg(entryId: "u1", role: .user, text: "try again", ts: 100),
+                    msg(text: "-op didn't help. Let me find the real sign-out trigger:", ts: nil)]
+        ChatMerger.merge(&list, [msg(entryId: "a1", text: fullReply, ts: 200)], placement: .tail)
+        XCTAssertEqual(list.map(\.text), ["try again", fullReply])
+    }
+
+    func testReplaceTailKeepsTheStreamingBubbleEvenIfOlderThanPage() {
+        // Streaming bubble stamped at message start (150) but the page's newest
+        // persisted row is a steered user message stamped 300.
+        let bubble = msg(text: "Working through the sign-out path", ts: 150)
+        var list = [msg(entryId: "a0", text: "earlier", ts: 50), bubble]
+        ChatMerger.replaceTail(&list, with: [msg(entryId: "a0", text: "earlier", ts: 50),
+                                             msg(entryId: "u9", role: .user, text: "steer", ts: 300)],
+                               keeping: bubble.id)
+        XCTAssertTrue(list.contains { $0.id == bubble.id }, "the live bubble must survive a reset reload")
+    }
+
+    func testPruneRemovesLeftoverFragmentButNotTheLiveBubble() {
+        let live = msg(text: "Let me find the real", ts: nil)
+        var list = [msg(entryId: "a1", text: fullReply, ts: 200),
+                    msg(text: "didn't help. Let me find the real sign-out", ts: nil),
+                    live]
+        ChatMerger.pruneFragments(&list, keep: live.id)
+        XCTAssertEqual(list.map(\.text), [fullReply, "Let me find the real"])
+    }
+
+    func testPruneIgnoresOldMessagesAndShortText() {
+        var list = [msg(entryId: "old", text: "All tests pass on every platform now.", ts: 10)]
+        for i in 0..<3 { list.append(msg(entryId: "n\(i)", text: "newer reply \(i) with other words", ts: 20 + i)) }
+        list.append(msg(text: "All tests pass", ts: nil)) // a NEW reply repeating an old phrase
+        ChatMerger.pruneFragments(&list, keep: nil)
+        XCTAssertEqual(list.last?.text, "All tests pass", "only the last 3 confirmed replies are candidates")
+    }
+
     // MARK: - Legacy behaviour (kept)
 
     func testAppendsNewMessages() {
