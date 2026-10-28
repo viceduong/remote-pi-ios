@@ -542,7 +542,9 @@ final class TranscriptReplayTests: XCTestCase {
         vm.mergeDeltaForTesting(page)
         vm.reloadForTesting(page, mark: vm.liveMarkForTesting)
         vm.commitNow()
-        XCTAssertEqual(vm.visibleMessages.map(\.text), projection().map(\.text))
+        // Compare the same representation on both sides (Q&A rows map to
+        // their "Q:/A:" row text via `row`).
+        XCTAssertEqual(visible(vm).map(\.text), projection().map(\.text))
         XCTAssertEqual(vm.visibleMessages.map(\.entryId), Self.conversation.map(\.entryId))
         // Only persisted rows are cached for key-less servers.
         XCTAssertTrue(vm.cacheableRowsForTesting.allSatisfy { $0.entryId != nil })
