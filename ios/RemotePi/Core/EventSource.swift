@@ -162,6 +162,14 @@ struct SSEParser {
  * The parser and reconnect loop are single-task confined. UI callbacks are
  * always delivered on MainActor. Reconnects use Last-Event-ID, server retry
  * hints, bounded exponential backoff, and jitter.
+ *
+ * Cursor rule (contract v2 §13 "Event cursor"): the Last-Event-ID advances
+ * only for frames actually DELIVERED to `onFrames`, never at parse time.
+ * Frames parsed but still waiting for the main-actor drain when the stream
+ * is stopped or reconnects are discarded un-acknowledged, so the server
+ * re-sends them (delta offsets make re-sends idempotent). Frames of a
+ * superseded connection are never delivered after its successor started,
+ * so a frame is never delivered twice either.
  */
 final class EventSource {
     enum State: Equatable {
@@ -180,10 +188,13 @@ final class EventSource {
     private let lock = NSLock()
     private var closed = true
     private var generation = 0
+    /// Bumped for every connection attempt (also within one run's
+    /// reconnect loop): frames of an older connection are not delivered.
+    private var connection = 0
     private var lastEventId: String?
     private var retryDelay: TimeInterval = 1
     /// Frames parsed off-main waiting for the next main-actor drain.
-    private var pendingFrames: [(generation: Int, frame: ParsedSSEFrame)] = []
+    private var pendingFrames: [(generation: Int, connection: Int, frame: ParsedSSEFrame)] = []
     private var drainScheduled = false
 
     /// `configuration` is injectable for tests (URLProtocol stubs).
@@ -243,15 +254,27 @@ final class EventSource {
         return !closed && self.generation == generation
     }
 
-    private func currentCursor() -> String? {
+    /// Start a connection attempt: atomically retire the previous
+    /// connection's undelivered frames and read the delivered-frames cursor.
+    private func beginConnection() -> (connection: Int, cursor: String?) {
+        lock.lock(); defer { lock.unlock() }
+        connection += 1
+        return (connection, lastEventId)
+    }
+
+    #if DEBUG
+    /// Test seam: the Last-Event-ID the next connection would send.
+    var cursorForTesting: String? {
         lock.lock(); defer { lock.unlock() }
         return lastEventId
     }
 
-    private func updateCursor(_ cursor: String?) {
-        guard let cursor else { return }
-        lock.lock(); lastEventId = cursor; lock.unlock()
+    /// Test seam: frames parsed but not yet delivered.
+    var pendingFrameCountForTesting: Int {
+        lock.lock(); defer { lock.unlock() }
+        return pendingFrames.count
     }
+    #endif
 
     private func run(generation: Int) async {
         var parser = SSEParser()
@@ -259,12 +282,13 @@ final class EventSource {
 
         while isCurrent(generation) {
             emitState(.connecting, generation: generation)
+            let (currentConnection, cursor) = beginConnection()
             var request = URLRequest(url: url)
             request.timeoutInterval = 60
             if !token.isEmpty {
                 request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             }
-            if let cursor = currentCursor(), !cursor.isEmpty {
+            if let cursor, !cursor.isEmpty {
                 request.setValue(cursor, forHTTPHeaderField: "Last-Event-ID")
             }
 
@@ -296,8 +320,8 @@ final class EventSource {
                         setRetryDelay(TimeInterval(retry) / 1000)
                     }
                     if let frame {
-                        updateCursor(parser.cursor)
-                        emitFrame(ParsedSSEFrame(frame), generation: generation)
+                        // The cursor is NOT advanced here — only on delivery.
+                        emitFrame(ParsedSSEFrame(frame), generation: generation, connection: currentConnection)
                     }
                 }
                 parser.finish()
@@ -353,10 +377,13 @@ final class EventSource {
 
     /// Buffer a parsed frame and schedule ONE main-actor drain for the whole
     /// burst (replays and coalesced deltas arrive in clumps).
-    private func emitFrame(_ frame: ParsedSSEFrame, generation: Int) {
+    private func emitFrame(_ frame: ParsedSSEFrame, generation: Int, connection: Int) {
         lock.lock()
-        guard !closed, self.generation == generation else { lock.unlock(); return }
-        pendingFrames.append((generation, frame))
+        guard !closed, self.generation == generation, self.connection == connection else {
+            lock.unlock()
+            return
+        }
+        pendingFrames.append((generation, connection, frame))
         let schedule = !drainScheduled
         drainScheduled = true
         lock.unlock()
@@ -368,20 +395,36 @@ final class EventSource {
 
     @MainActor
     private func drainFrames() {
-        let frames = takePendingFrames()
+        guard let handler = onFrames else {
+            _ = takePendingFrames(acknowledge: false)
+            return
+        }
+        // Taking the batch and acknowledging it (cursor) happen under the
+        // lock, atomically w.r.t. `beginConnection`; the handler then runs
+        // synchronously on this actor, so every acknowledged frame IS
+        // delivered and no successor connection can have requested a replay
+        // from an older cursor in between.
+        let frames = takePendingFrames(acknowledge: true)
         guard !frames.isEmpty else { return }
-        onFrames?(frames)
+        handler(frames)
     }
 
-    private func takePendingFrames() -> [ParsedSSEFrame] {
+    private func takePendingFrames(acknowledge: Bool) -> [ParsedSSEFrame] {
         lock.lock()
         defer { lock.unlock() }
         let batch = pendingFrames
         pendingFrames = []
         drainScheduled = false
         guard !closed else { return [] }
-        let current = generation
-        return batch.filter { $0.generation == current }.map(\.frame)
+        let currentGeneration = generation
+        let currentConnection = connection
+        let frames = batch
+            .filter { $0.generation == currentGeneration && $0.connection == currentConnection }
+            .map(\.frame)
+        if acknowledge, let id = frames.last(where: { $0.id != nil })?.id {
+            lastEventId = id
+        }
+        return frames
     }
 
     private func emitError(_ message: String, generation: Int) {

@@ -303,15 +303,30 @@ final class ActivityAndQATests: XCTestCase {
         XCTAssertNil(ChatViewModel.qaMessage(event: ["type": "message_end"], message: raw),
                      "older servers: no qa → tool row stays hidden")
 
-        var rows = [live]
+        // §13: the Q&A row is keyed `tool:<toolCallId>` live and in history.
+        var store = TranscriptStore()
+        let keyedLive = ChatViewModel.identified(live, key: "tool:call-7")
+        store.upsertLive(keyedLive)
         let server = ChatMessage(entryId: "e1", role: .tool, text: "", thinking: nil, toolCalls: [],
                                  isError: false, toolName: "ask_user_question", isSystemNote: false,
                                  model: nil, errorMessage: nil, timestamp: 1_000,
-                                 qa: QAInfo(cancelled: true, items: []))
-        ChatMerger.merge(&rows, [server])
-        XCTAssertEqual(rows.count, 1, "live + server copy are one row")
-        XCTAssertEqual(rows[0].id, live.id, "row identity is stable")
-        XCTAssertEqual(rows[0].entryId, "e1")
+                                 qa: QAInfo(cancelled: true, items: []), key: "tool:call-7")
+        store.merge([server], placement: .newer)
+        XCTAssertEqual(store.rows.count, 1, "live + server copy are one row")
+        XCTAssertEqual(store.rows[0].id, keyedLive.id, "row identity is stable")
+        XCTAssertEqual(store.rows[0].entryId, "e1")
+
+        // Pre-§13 server (no keys): both copies derive the same identity
+        // from pi's timestamp — still one row, no text matching involved.
+        var legacy = TranscriptStore()
+        legacy.upsertLive(ChatViewModel.identified(live, key: nil))
+        let legacyServer = ChatMessage(entryId: "e1", role: .tool, text: "", thinking: nil, toolCalls: [],
+                                       isError: false, toolName: "ask_user_question", isSystemNote: false,
+                                       model: nil, errorMessage: nil, timestamp: 1_000,
+                                       qa: QAInfo(cancelled: true, items: []))
+        legacy.merge(ChatViewModel.prepareHistory([legacyServer]), placement: .newer)
+        XCTAssertEqual(legacy.rows.count, 1)
+        XCTAssertEqual(legacy.rows[0].entryId, "e1")
     }
 
     func testQARowSurvivesCacheRoundTrip() throws {

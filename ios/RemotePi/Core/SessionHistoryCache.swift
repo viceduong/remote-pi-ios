@@ -10,6 +10,10 @@ import Foundation
 /// - Writes are skipped when the content signature didn't change, run on the
 ///   actor (off the main thread) and are atomic.
 /// - The directory is pruned to the `maxFiles` most recently written files.
+/// - Contract §13: only rows with an identity (message `key` or entry id) are
+///   ever stored or loaded — the caller passes settled rows only (never the
+///   in-progress or an incomplete row), and `load` drops anything else
+///   (older builds cached orphan stream bubbles without either).
 actor SessionHistoryCache {
     static let shared = SessionHistoryCache()
     static let maxFiles = 40
@@ -46,6 +50,7 @@ actor SessionHistoryCache {
         h.combine(messages.count)
         for m in messages.suffix(maxMessages) {
             h.combine(m.id)
+            h.combine(m.key)
             h.combine(m.entryId)
             h.combine(m.text.utf8.count)
             h.combine(m.isError)
@@ -63,14 +68,21 @@ actor SessionHistoryCache {
         guard let data = try? Data(contentsOf: url),
               let snap = try? JSONDecoder().decode(Snapshot.self, from: data) else { return nil }
         guard Date().timeIntervalSince(snap.savedAt) < maxAge else { return nil }
-        guard !snap.messages.isEmpty else { return nil }
-        lastSignature[sessionId] = Self.signature(messages: snap.messages, hasMore: snap.hasMore, cursor: snap.cursor)
-        return snap
+        var clean = snap
+        clean.messages = Self.sanitized(snap.messages)
+        guard !clean.messages.isEmpty else { return nil }
+        lastSignature[sessionId] = Self.signature(messages: clean.messages, hasMore: clean.hasMore, cursor: clean.cursor)
+        return clean
+    }
+
+    /// Rows with an identity only (§13 key or pi entry id).
+    static func sanitized(_ messages: [ChatMessage]) -> [ChatMessage] {
+        messages.filter { $0.key != nil || $0.entryId != nil }
     }
 
     func save(sessionId: String, messages: [ChatMessage], hasMore: Bool, cursor: String?) {
         // Bound: the newest rows only — cache is for instant-open, not archival.
-        let tail = Array(messages.suffix(Self.maxMessages))
+        let tail = Array(Self.sanitized(messages).suffix(Self.maxMessages))
         guard !tail.isEmpty else { return }
         let signature = Self.signature(messages: tail, hasMore: hasMore, cursor: cursor)
         guard lastSignature[sessionId] != signature else { return }

@@ -102,25 +102,33 @@ enum QueueReconciler {
     static let textMatchSkewMs = 120_000
 
     /// Merge server queue items, local in-flight sends and pi-native queued
-    /// texts into one ordered chip list, dropping anything already delivered
-    /// (a user row exists for it). Returns the chips plus the
-    /// clientMessageIds of local sends that are now delivered.
+    /// texts into one ordered chip list, dropping anything already delivered.
+    /// Returns the chips plus the clientMessageIds of local sends that are
+    /// now delivered.
+    ///
+    /// Delivered = a user row with the item's `clientMessageId` exists
+    /// (contract §3/§13: echo and history rows carry it) — so a chip goes
+    /// away exactly when its user row appears. `legacyTextMatch` enables the
+    /// text fallback for servers that send no message `key` (pre-§13, whose
+    /// echoes may lack the id); keyed servers never match by text.
     static func reconcile(localPending: [QueueItem],
                           server: [QueueItem],
                           piNative: [String],
-                          messages: [ChatMessage]) -> (chips: [QueueChip], deliveredLocal: Set<String>) {
+                          messages: [ChatMessage],
+                          legacyTextMatch: Bool = false) -> (chips: [QueueChip], deliveredLocal: Set<String>) {
         if localPending.isEmpty && server.isEmpty && piNative.isEmpty { return ([], []) }
         var deliveredCids = Set<String>()
         var recent: [(norm: String, ts: Int?, cid: String?)] = []
         for m in messages.reversed() where m.role == .user && !m.isSystemNote {
             if let cid = m.clientMessageId { deliveredCids.insert(cid) }
-            if recent.count < 12 {
+            if legacyTextMatch, recent.count < 12 {
                 recent.append((TextNormalizer.normalize(m.text), m.timestamp, m.clientMessageId))
             }
         }
         var consumed = [Bool](repeating: false, count: recent.count)
 
         func deliveredByText(_ item: QueueItem) -> Bool {
+            guard legacyTextMatch else { return false }
             let norm = TextNormalizer.normalize(item.message)
             guard !norm.isEmpty else { return false }
             for (i, row) in recent.enumerated() where !consumed[i] {
@@ -165,7 +173,7 @@ enum QueueReconciler {
             if seenCids.contains(cid) { continue }
             let norm = TextNormalizer.normalize(l.message)
             // v1 servers may return queue items without a clientMessageId.
-            if server.contains(where: { $0.isActive && $0.clientMessageId == nil
+            if legacyTextMatch, server.contains(where: { $0.isActive && $0.clientMessageId == nil
                 && TextNormalizer.normalize($0.message) == norm }) { continue }
             if l.status != "queued", deliveredByText(l) { deliveredLocal.insert(cid); continue }
             seenCids.insert(cid)

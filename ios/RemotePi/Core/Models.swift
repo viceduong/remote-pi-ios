@@ -442,6 +442,8 @@ struct WireMessage: Decodable {
     let clientMessageId: String?
     /// Contract §9: Q&A payload on the `ask_user_question` result row.
     let qa: Lenient<QAInfo>?
+    /// Contract §13: stable transcript identity (absent on older servers).
+    let key: String?
 
     func toChatMessage() -> ChatMessage {
         let rawRole = self.role
@@ -462,7 +464,7 @@ struct WireMessage: Decodable {
         if role == .tool {
             var message = ChatMessage(entryId: id, role: .tool, text: body, thinking: nil, toolCalls: [],
                                       isError: isError, toolName: toolName, isSystemNote: false,
-                                      model: nil, errorMessage: nil, timestamp: timestamp)
+                                      model: nil, errorMessage: nil, timestamp: timestamp, key: key)
             message.qa = qa?.value
             return message
         }
@@ -478,7 +480,8 @@ struct WireMessage: Decodable {
             isSystemNote: role == .user && (system == true || ChatMessage.isBgNotification(body)),
             model: model,
             errorMessage: errorMessage,
-            timestamp: timestamp
+            timestamp: timestamp,
+            key: key
         )
     }
 }
@@ -562,13 +565,19 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     /// Contract §9: set on the `ask_user_question` result row — the one
     /// visible tool row (rendered as a compact Q&A card).
     var qa: QAInfo?
+    /// Contract §13 transcript identity (`<role>:<timestamp>`,
+    /// `tool:<toolCallId>`, `#n` suffix on collisions). Server-sent, or
+    /// derived from the timestamp for pre-§13 servers
+    /// (`ChatViewModel.identified`).
+    var key: String?
 
     init(id: String? = nil, entryId: String? = nil, clientMessageId: String? = nil,
          role: MessageRole, text: String, thinking: String?, toolCalls: [ToolCall],
          isError: Bool, toolName: String?,
          isSystemNote: Bool, model: String?, errorMessage: String?, timestamp: Int?,
-         qa: QAInfo? = nil) {
-        self.id = id ?? entryId.map { "entry:\($0)" } ?? "local:\(UUID().uuidString)"
+         qa: QAInfo? = nil, key: String? = nil) {
+        self.id = id ?? key.map { "k:\($0)" } ?? entryId.map { "entry:\($0)" } ?? "local:\(UUID().uuidString)"
+        self.key = key
         self.entryId = entryId
         self.clientMessageId = clientMessageId
         self.role = role
@@ -587,7 +596,7 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     enum CodingKeys: String, CodingKey {
         case id, entryId, clientMessageId, role, text, thinking, toolCalls
         case isError, toolName, isSystemNote, model
-        case errorMessage, timestamp, qa
+        case errorMessage, timestamp, qa, key
     }
 
     init(from decoder: Decoder) throws {
@@ -608,6 +617,7 @@ struct ChatMessage: Identifiable, Equatable, Codable {
         errorMessage = try c.decodeIfPresent(String.self, forKey: .errorMessage)
         timestamp = try c.decodeIfPresent(Int.self, forKey: .timestamp)
         qa = try? c.decodeIfPresent(QAInfo.self, forKey: .qa)
+        key = try? c.decodeIfPresent(String.self, forKey: .key)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -626,6 +636,7 @@ struct ChatMessage: Identifiable, Equatable, Codable {
         try c.encodeIfPresent(errorMessage, forKey: .errorMessage)
         try c.encodeIfPresent(timestamp, forKey: .timestamp)
         try c.encodeIfPresent(qa, forKey: .qa)
+        try c.encodeIfPresent(key, forKey: .key)
     }
 
     /// Retain at most one consecutive blank line, trim leading/trailing
@@ -696,7 +707,8 @@ struct ChatMessage: Identifiable, Equatable, Codable {
                 model: json["model"] as? String,
                 errorMessage: json["errorMessage"] as? String,
                 timestamp: timestamp,
-                qa: role == .tool ? QAInfo(json: json["qa"]) : nil
+                qa: role == .tool ? QAInfo(json: json["qa"]) : nil,
+                key: json["key"] as? String
             )
         }
         var text = ""
@@ -771,7 +783,8 @@ struct ChatMessage: Identifiable, Equatable, Codable {
             model: model,
             errorMessage: json["errorMessage"] as? String,
             timestamp: timestamp,
-            qa: role == .tool ? QAInfo(json: json["qa"]) : nil
+            qa: role == .tool ? QAInfo(json: json["qa"]) : nil,
+            key: json["key"] as? String
         )
     }
 

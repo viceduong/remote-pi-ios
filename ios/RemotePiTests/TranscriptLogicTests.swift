@@ -90,11 +90,13 @@ final class TranscriptLogicTests: XCTestCase {
     /// clientMessageId; the server's running item text-matched it first and
     /// consumed it, so the local "sending" twin found no row left and stayed
     /// stuck under the delivered message.
-    func testRunningServerItemAndLocalTwinBothDeliveredByOneTextMatch() {
+    /// (Pre-§13 servers only — the legacy text fallback.)
+    func testLegacyRunningServerItemAndLocalTwinBothDeliveredByOneTextMatch() {
         let local = queue("pending:c7", "Downloaded to D:/randochat", status: "sending", cid: "c7", at: 9000)
         let server = queue("srv-7", "Downloaded to D:/randochat", status: "running", cid: "c7", at: 9001)
         let echo = msg(entryId: "e7", role: .user, text: "Downloaded to D:/randochat", ts: 9002, cid: nil)
-        let result = QueueReconciler.reconcile(localPending: [local], server: [server], piNative: [], messages: [echo])
+        let result = QueueReconciler.reconcile(localPending: [local], server: [server], piNative: [], messages: [echo],
+                                               legacyTextMatch: true)
         XCTAssertTrue(result.chips.isEmpty, "no stuck 'sending' chip under the delivered row")
         XCTAssertEqual(result.deliveredLocal, ["c7"])
     }
@@ -114,20 +116,50 @@ final class TranscriptLogicTests: XCTestCase {
         XCTAssertEqual(result.deliveredLocal, ["c9"])
     }
 
-    func testMultiLineTextFallbackMatchesWithSameNormalization() {
+    func testLegacyMultiLineTextFallbackMatchesWithSameNormalization() {
         // v1 server: echo has no clientMessageId; raw chip text has trailing
         // spaces/blank lines that the transcript row collapsed.
         let local = queue("srv-1", "line one  \n\n\nline two\n", status: "running", cid: "c1", at: 10_000)
         let echo = msg(entryId: "e1", role: .user, text: "line one\n\nline two", ts: 10_500)
-        let result = QueueReconciler.reconcile(localPending: [local], server: [], piNative: [], messages: [echo])
+        let result = QueueReconciler.reconcile(localPending: [local], server: [], piNative: [], messages: [echo],
+                                               legacyTextMatch: true)
         XCTAssertTrue(result.chips.isEmpty)
     }
 
-    func testQueuedItemIsNotHiddenByOldIdenticalPrompt() {
+    func testLegacyQueuedItemIsNotHiddenByOldIdenticalPrompt() {
         let oldEcho = msg(entryId: "e1", role: .user, text: "continue", ts: 1_000)
         let server = queue("srv-2", "continue", status: "queued", cid: "c2", at: 900_000)
-        let result = QueueReconciler.reconcile(localPending: [], server: [server], piNative: [], messages: [oldEcho])
+        let result = QueueReconciler.reconcile(localPending: [], server: [server], piNative: [], messages: [oldEcho],
+                                               legacyTextMatch: true)
         XCTAssertEqual(result.chips.count, 1)
+    }
+
+    /// Contract §13: a keyed server never matches chips by text — an echo
+    /// with the same text but no/another clientMessageId is another message.
+    func testKeyedServerNeverMatchesChipsByText() {
+        let local = queue("pending:c1", "continue", status: "sending", cid: "c1", at: 1_000)
+        let server = queue("srv-1", "continue", status: "running", cid: "c1", at: 1_001)
+        let sameTextNoId = msg(entryId: "e1", role: .user, text: "continue", ts: 1_002)
+        let sameTextOtherId = msg(entryId: "e2", role: .user, text: "continue", ts: 1_003, cid: "c-other")
+        let pending = QueueReconciler.reconcile(localPending: [local], server: [server], piNative: [],
+                                                messages: [sameTextNoId, sameTextOtherId])
+        XCTAssertEqual(pending.chips.map(\.rowId), ["q:c1"], "one chip, still pending")
+        XCTAssertTrue(pending.deliveredLocal.isEmpty)
+        let echo = msg(entryId: "e3", role: .user, text: "continue", ts: 1_004, cid: "c1")
+        let delivered = QueueReconciler.reconcile(localPending: [local], server: [server], piNative: [],
+                                                  messages: [sameTextNoId, sameTextOtherId, echo])
+        XCTAssertTrue(delivered.chips.isEmpty, "the cid echo removes the server chip and its local twin")
+        XCTAssertEqual(delivered.deliveredLocal, ["c1"])
+    }
+
+    // MARK: - Cache sanitizing (§13)
+
+    func testCacheKeepsOnlyRowsWithIdentity() {
+        let orphan = msg(role: .assistant, text: "-op didn't help. Let me find the real trigger:")
+        let persisted = msg(entryId: "e1", role: .user, text: "hi", ts: 1)
+        var keyed = msg(role: .assistant, text: "answer", ts: 2)
+        keyed.key = "assistant:2"
+        XCTAssertEqual(SessionHistoryCache.sanitized([orphan, persisted, keyed]).map(\.text), ["hi", "answer"])
     }
 
     // MARK: - Status reducer (I14 / contract v2 §5)

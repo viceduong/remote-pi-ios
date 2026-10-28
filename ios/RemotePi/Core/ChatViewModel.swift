@@ -5,8 +5,9 @@ import Combine
  * Chat state for one session (unidirectional data flow):
  *
  *   SSE frames / REST pages / user intents
- *        → reducers (ChatMerger for rows, QueueReconciler for chips,
- *          AgentStatusState for status)
+ *        → reducers (TranscriptStore for rows — contract §13 identity:
+ *          keyed rows, history order + live arrival order, offset-checked
+ *          deltas; QueueReconciler for chips; AgentStatusState for status)
  *        → `commitNow()` derives the visible transcript ONCE per main-loop
  *          turn and publishes it to the UIKit table via `transcript`.
  *
@@ -80,9 +81,13 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: Model state
 
-    /// Full row model (visible + hidden rows). Every mutation schedules one
-    /// coalesced commit.
-    private(set) var messages: [ChatMessage] = [] { didSet { scheduleCommit() } }
+    /// Full row model (visible + hidden rows), keyed by §13 identity. Every
+    /// mutation schedules one coalesced commit.
+    private(set) var store = TranscriptStore() { didSet { scheduleCommit() } }
+    var messages: [ChatMessage] { store.rows }
+    /// The server sends §13 message keys (any event/row carried `key`, even
+    /// null). Pre-§13 servers get derived keys and the legacy chip fallback.
+    private(set) var serverKeyed = false
     /// Rows passing the single visibility predicate (contract v2 §4).
     private(set) var visibleMessages: [ChatMessage] = []
     private(set) var hasMore = false
@@ -118,12 +123,6 @@ final class ChatViewModel: ObservableObject {
     private var lastFrameAt = Date()
     private var lastAgentError: String?
 
-    /// Row id of the assistant bubble receiving deltas (identity, not index).
-    private var streamingId: String?
-    /// Coalesced streamed deltas (~90ms flushes).
-    private var pendingDelta = ""
-    /// Batched file_update pushes.
-    private var pendingFileMessages: [ChatMessage] = []
     /// Questionnaire ids the server resolved/dropped (§8) — a failed POST
     /// must not resurrect them.
     private var resolvedQuestionIds = Set<String>()
@@ -148,8 +147,6 @@ final class ChatViewModel: ObservableObject {
     // MARK: Owned tasks (all cancelled in `stop()`)
 
     private var pollTask: Task<Void, Never>?
-    private var flushTask: Task<Void, Never>?
-    private var fileFlushTask: Task<Void, Never>?
     private var cacheSaveTask: Task<Void, Never>?
     private var loadWatchdog: Task<Void, Never>?
     private var resetTask: Task<Void, Never>?
@@ -179,12 +176,12 @@ final class ChatViewModel: ObservableObject {
         }
         observeNetwork()
         // Instant open: render the on-disk snapshot, then reconcile.
+        // `load` keeps only rows with an identity (key / entry id): older
+        // builds cached orphan stream bubbles — never resurrect them.
         if messages.isEmpty,
            let snap = await SessionHistoryCache.shared.load(sessionId: sessionId),
            ChatMessage.hasVisibleContent(snap.messages) {
-            messages = snap.messages
-            // Older builds cached orphan stream bubbles; never resurrect them.
-            ChatMerger.dropOrphanBubbles(&messages, streamingId: nil)
+            store = TranscriptStore(rows: snap.messages)
             hasMore = snap.hasMore
             lastSeenEntryId = snap.cursor
             loadPhase = .loaded
@@ -205,16 +202,12 @@ final class ChatViewModel: ObservableObject {
 
     func stop() {
         lifecycleActive = false
-        flushPendingDelta()
-        streamingId = nil
         eventSource?.stop()
         eventSource = nil
-        for task in [pollTask, flushTask, fileFlushTask, cacheSaveTask, loadWatchdog, resetTask] {
+        for task in [pollTask, cacheSaveTask, loadWatchdog, resetTask] {
             task?.cancel()
         }
         pollTask = nil
-        flushTask = nil
-        fileFlushTask = nil
         cacheSaveTask = nil
         loadWatchdog = nil
         resetTask = nil
@@ -224,7 +217,6 @@ final class ChatViewModel: ObservableObject {
         ownedTasks.removeAll()
         networkCancellable = nil
         status.onBecameIdle = nil
-        pendingFileMessages.removeAll()
         saveCacheNow()
     }
 
@@ -236,7 +228,6 @@ final class ChatViewModel: ObservableObject {
         eventSource?.stop()
         pollTask?.cancel()
         pollTask = nil
-        flushPendingDelta()
         saveCacheNow()
     }
 
@@ -336,7 +327,8 @@ final class ChatViewModel: ObservableObject {
         pruneSteering()
         let reconciled = QueueReconciler.reconcile(localPending: steered(localPending),
                                                    server: steered(serverQueue),
-                                                   piNative: piQueue, messages: messages)
+                                                   piNative: piQueue, messages: messages,
+                                                   legacyTextMatch: !serverKeyed)
         if !reconciled.deliveredLocal.isEmpty,
            localPending.contains(where: { reconciled.deliveredLocal.contains($0.clientMessageId ?? "") }) {
             localPending.removeAll { reconciled.deliveredLocal.contains($0.clientMessageId ?? "") }
@@ -345,6 +337,7 @@ final class ChatViewModel: ObservableObject {
 
         var items: [TranscriptItem] = []
         items.reserveCapacity(visibleMessages.count + reconciled.chips.count + offlinePending.count)
+        let streamingId = store.inProgressId
         for m in visibleMessages {
             items.append(ChatViewModel.transcriptItem(for: m, streaming: m.id == streamingId))
         }
@@ -481,10 +474,17 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Cache
 
+    /// Only settled rows with a server identity: never the in-progress or an
+    /// incomplete (gap) row, never a row without key/entry id. On pre-§13
+    /// servers only persisted (entry-id) rows — derived keys stay in memory.
     private func cacheableMessages() -> [ChatMessage] {
-        let tail = messages.suffix(SessionHistoryCache.maxMessages)
-        // Never persist the streaming bubble or any floating (orphan) row.
-        return tail.filter { $0.id != streamingId && !ChatMerger.isFloating($0) }
+        ChatViewModel.cacheable(store, serverKeyed: serverKeyed)
+    }
+
+    nonisolated static func cacheable(_ store: TranscriptStore, serverKeyed: Bool) -> [ChatMessage] {
+        store.rows.suffix(SessionHistoryCache.maxMessages).filter { m in
+            store.isSettled(m) && (m.entryId != nil || (serverKeyed && m.key != nil))
+        }
     }
 
     /// Debounced (2s after the last change), content-gated, written off-main
@@ -542,6 +542,18 @@ final class ChatViewModel: ObservableObject {
         rows.filter { $0.role != .tool || $0.qa != nil }
     }
 
+    /// History rows as stored: displayable, with an identity (server `key`,
+    /// else the derived pre-§13 key — see `identified`).
+    nonisolated static func prepareHistory(_ rows: [ChatMessage]) -> [ChatMessage] {
+        displayable(rows).map { identified($0, key: nil) }
+    }
+
+    /// Note whether a page comes from a §13 server, then prepare its rows.
+    private func historyRows(_ page: [ChatMessage]) -> [ChatMessage] {
+        if !serverKeyed, page.contains(where: { $0.key != nil }) { serverKeyed = true }
+        return ChatViewModel.prepareHistory(page)
+    }
+
     /// Delta refresh by entry-id cursor. Coalesced: concurrent callers share
     /// one in-flight request (plus at most one follow-up).
     private func refreshFromServer() async {
@@ -558,21 +570,26 @@ final class ChatViewModel: ObservableObject {
         } while refreshAgain && lifecycleActive
     }
 
+    /// Fire-and-forget refresh (healing after a broken stream).
+    private func requestRefresh() {
+        guard lifecycleActive else { return }
+        spawn { [weak self] in await self?.refreshFromServer() }
+    }
+
     private func performRefresh() async {
         let cursor = lastSeenEntryId
+        let mark = store.liveMark
         do {
             let page = try await client.fetchMessages(sessionId, limit: cursor == nil ? 100 : 200, since: cursor)
             guard lifecycleActive else { return }
             if let working = page.working { status.apply(.legacyBusy(working)) }
-            let rows = ChatViewModel.displayable(page.messages)
             let isDelta = cursor != nil && (page.cursorMode ?? true)
             if isDelta {
                 // Empty delta = nothing new: a successful no-op.
                 guard !page.messages.isEmpty else { return }
-                ChatMerger.merge(&messages, rows, placement: .tail)
-                ChatMerger.pruneFragments(&messages, keep: streamingId)
+                store.merge(historyRows(page.messages), placement: .newer)
             } else {
-                ChatMerger.replaceTail(&messages, with: rows, keeping: streamingId)
+                store.reload(historyRows(page.messages), keepingLiveAfter: mark)
                 hasMore = page.hasMore
                 noteLowest(page.messages)
                 if loadPhase != .loaded { loadPhase = .loaded }
@@ -585,16 +602,21 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    /// SSE `reset` (contract v2 §1): full tail reload REPLACING the tail.
+    /// SSE `reset` (contract v2 §1 / §13 "Ordering"): the server could not
+    /// replay, so live frames were lost. The in-progress row is no longer
+    /// authoritative (the server re-announces it with `message_snapshot`
+    /// right after the reset), then a full tail reload REPLACES the tail,
+    /// keeping only rows that arrived live after the request started.
     private func scheduleResetReload() {
+        store.interruptInProgress()
+        let mark = store.liveMark
         resetTask?.cancel()
         resetTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let page = try await self.client.fetchMessages(self.sessionId, limit: 100)
                 guard self.lifecycleActive, !Task.isCancelled else { return }
-                self.flushPendingDelta()
-                ChatMerger.replaceTail(&self.messages, with: ChatViewModel.displayable(page.messages), keeping: self.streamingId)
+                self.store.reload(self.historyRows(page.messages), keepingLiveAfter: mark)
                 self.hasMore = page.hasMore
                 self.noteLowest(page.messages)
                 self.advanceCursor(page.messages)
@@ -617,20 +639,22 @@ final class ChatViewModel: ObservableObject {
             loadWatchdog?.cancel()
             loadWatchdog = nil
         }
+        let mark = store.liveMark
         do {
             let page = try await client.fetchMessages(sessionId, limit: 100)
             guard lifecycleActive else { return }
-            ChatMerger.replaceTail(&messages, with: ChatViewModel.displayable(page.messages), keeping: streamingId)
+            store.reload(historyRows(page.messages), keepingLiveAfter: mark)
             hasMore = page.hasMore
             noteLowest(page.messages)
             advanceCursor(page.messages)
             if let working = page.working { status.apply(.legacyBusy(working)) }
             // Blank-page guard: a tail that is one long tool loop has nothing
             // visible — fetch the newest VISIBLE rows (server ?visible=1).
+            // They are all older than the tail page.
             if !ChatMessage.hasVisibleContent(messages), hasMore,
                let visible = try? await client.fetchMessages(sessionId, limit: 100, visibleOnly: true),
                lifecycleActive {
-                ChatMerger.merge(&messages, ChatViewModel.displayable(visible.messages))
+                store.merge(historyRows(visible.messages), placement: .older)
                 hasMore = visible.hasMore
                 noteLowest(visible.messages)
             }
@@ -654,7 +678,9 @@ final class ChatViewModel: ObservableObject {
     }
 
     /// Fetch older pages (triggered near the top of the transcript). Keeps
-    /// going (bounded) while pages add nothing visible.
+    /// going (bounded) while pages add nothing visible. The `before` cursor
+    /// is the server's timestamp pagination API — rows are still placed by
+    /// identity/page order (an older page goes above the loaded rows).
     func loadMore() {
         guard lifecycleActive, hasMore, !loadingMore, loadPhase == .loaded else { return }
         loadingMore = true
@@ -675,10 +701,11 @@ final class ChatViewModel: ObservableObject {
                         self.hasMore = false
                         return
                     }
-                    ChatMerger.merge(&self.messages, ChatViewModel.displayable(page.messages))
+                    let rows = self.historyRows(page.messages)
+                    self.store.merge(rows, placement: .older)
                     self.hasMore = page.hasMore
                     self.noteLowest(page.messages)
-                    let addedVisible = ChatViewModel.displayable(page.messages).contains(where: ChatMessage.isVisibleInFocus)
+                    let addedVisible = rows.contains(where: ChatMessage.isVisibleInFocus)
                     if addedVisible || self.visibleMessages.count != visibleBefore { return }
                 } catch {
                     return // transient — the next scroll retries
@@ -692,7 +719,7 @@ final class ChatViewModel: ObservableObject {
     /// the oldest rows are the farthest from the viewport).
     private func evictLiveTailIfNeeded() {
         guard messages.count > 1_500, viewportNearBottom else { return }
-        messages.removeFirst(messages.count - 1_000)
+        store.evictOldest(messages.count - 1_000)
         hasMore = true
         lowestFetchedTs = messages.compactMap(\.timestamp).min()
     }
@@ -1235,7 +1262,7 @@ final class ChatViewModel: ObservableObject {
 
     #if DEBUG
     /// Test seam: feed parsed SSE frames through the real frame handler
-    /// without opening a stream (snapshot/integration tests only).
+    /// without opening a stream (snapshot/integration/replay tests).
     func ingestForTesting(_ frames: [ParsedSSEFrame]) {
         lifecycleActive = true
         handle(frames)
@@ -1244,6 +1271,35 @@ final class ChatViewModel: ObservableObject {
     /// Test seam: install a model listing as if `GET /models` returned it.
     func seedModelsForTesting(_ listing: ModelListing) {
         adoptListing(listing)
+    }
+
+    /// Test seam: the live-arrival mark a reload request captures when it
+    /// starts (`store.liveMark`).
+    var liveMarkForTesting: Int { store.liveMark }
+
+    /// Test seam: complete a reload (initial / cursor-unknown / reset) with
+    /// `page` as the server's `GET /messages` rows, for a request that
+    /// started at `mark` — the same code path as the real responses.
+    func reloadForTesting(_ page: [ChatMessage], mark: Int) {
+        lifecycleActive = true
+        store.reload(historyRows(page), keepingLiveAfter: mark)
+        advanceCursor(page)
+    }
+
+    /// Test seam: a cursor (`since`) delta page.
+    func mergeDeltaForTesting(_ page: [ChatMessage]) {
+        lifecycleActive = true
+        store.merge(historyRows(page), placement: .newer)
+        advanceCursor(page)
+    }
+
+    /// Test seam: rows that would be written to the on-disk cache.
+    var cacheableRowsForTesting: [ChatMessage] { cacheableMessages() }
+
+    /// Test seam: open with a cached snapshot (as `start()` does).
+    func loadCacheForTesting(_ rows: [ChatMessage]) {
+        store = TranscriptStore(rows: SessionHistoryCache.sanitized(rows))
+        loadPhase = .loaded
     }
     #endif
 
@@ -1259,11 +1315,13 @@ final class ChatViewModel: ObservableObject {
         case "agent_start", "turn_start":
             status.apply(.legacyBusy(true))
         case "agent_end", "agent_settled":
-            flushPendingDelta()
+            streamBrokeIfInProgress()
             status.apply(.legacyBusy(false))
         case "agent_exited":
+            streamBrokeIfInProgress()
             status.apply(.exited)
         case "agent_crashed":
+            streamBrokeIfInProgress()
             status.apply(.crashed)
         case "tool_execution_start":
             status.apply(.activity(AgentActivity(kind: .tool, tool: obj["toolName"] as? String)))
@@ -1277,6 +1335,8 @@ final class ChatViewModel: ObservableObject {
             handleMessageUpdate(obj)
         case "message_end":
             handleMessageEnd(obj)
+        case "message_snapshot":
+            handleMessageSnapshot(obj)
         case "file_update":
             handleFileUpdate(obj)
         case "queue_update":
@@ -1310,6 +1370,13 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    /// The agent stopped while a message was still streaming (its
+    /// message_end was lost): the row is no longer authoritative — heal it
+    /// from history (the persisted copy replaces it by key).
+    private func streamBrokeIfInProgress() {
+        if store.interruptInProgress() { requestRefresh() }
+    }
+
     /// Contract v2 §5: `agent_status` is the single source of truth.
     private func handleAgentStatus(_ obj: [String: Any]) {
         let v2 = obj["busy"] != nil || obj["owner"] != nil
@@ -1324,7 +1391,7 @@ final class ChatViewModel: ObservableObject {
         }
         let snapshot = awaitingSnapshot
         awaitingSnapshot = false
-        if !busy { flushPendingDelta() }
+        if !busy { streamBrokeIfInProgress() }
         // §7: the key's presence (even null) marks an activity-aware server.
         let hasActivity = obj.keys.contains("activity")
         let activity = (obj["activity"] as? [String: Any]).flatMap(AgentActivity.init(json:))
@@ -1351,25 +1418,78 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Identity (contract §13)
+
+    /// A §13 server puts `key` on every message event (null for deltas of a
+    /// message whose start it did not see). Its mere presence marks the
+    /// server as keyed.
+    private func noteKeyed(_ obj: [String: Any]) -> Bool {
+        let keyed = obj.keys.contains("key")
+        if keyed, !serverKeyed { serverKeyed = true }
+        return keyed
+    }
+
+    /// The event's key: top-level (message events, snapshot) or on the
+    /// server-mapped message (`file_update.message`, history shape).
+    nonisolated static func eventKey(_ obj: [String: Any], _ msg: [String: Any]?) -> String? {
+        (obj["key"] as? String) ?? (msg?["key"] as? String)
+    }
+
+    /// Give a row its identity: the server key when given, else the key it
+    /// already carries, else (pre-§13 server) the same `<role>:<timestamp>`
+    /// shape derived from pi's creation timestamp, which pi streams AND
+    /// persists unchanged. Rows created here get the key-based row id.
+    nonisolated static func identified(_ m: ChatMessage, key: String?) -> ChatMessage {
+        var r = m
+        if let key { r.key = key } else if r.key == nil { r.key = derivedKey(r) }
+        if r.entryId == nil, let k = r.key { r.id = "k:" + k }
+        return r
+    }
+
+    /// Pre-§13 identity. Tool rows (only Q&A rows are kept) use the
+    /// timestamp too: the history shape carries no toolCallId.
+    nonisolated static func derivedKey(_ m: ChatMessage) -> String? {
+        guard let ts = m.timestamp else { return nil }
+        switch m.role {
+        case .user: return "user:\(ts)"
+        case .assistant: return "assistant:\(ts)"
+        case .tool: return "tool@\(ts)"
+        }
+    }
+
+    /// Map an event's message, attaching the event-level clientMessageId
+    /// (§3) to user rows.
+    private static func mapped(_ obj: [String: Any], _ msg: [String: Any]) -> ChatMessage {
+        var m = ChatMessage.fromAgentMessage(msg)
+        if m.role == .user, m.clientMessageId == nil {
+            m.clientMessageId = obj["clientMessageId"] as? String
+        }
+        return m
+    }
+
+    // MARK: - Message events
+
     private func handleMessageStart(_ obj: [String: Any]) {
+        _ = noteKeyed(obj)
         guard let msg = obj["message"] as? [String: Any] else { return }
+        let key = ChatViewModel.eventKey(obj, msg)
         if let qaRow = ChatViewModel.qaMessage(event: obj, message: msg) {
-            upsertQA(qaRow)
+            store.upsertLive(ChatViewModel.identified(qaRow, key: key))
             return
         }
         if ChatViewModel.isToolMessage(msg) {
             status.apply(.activity(nil))
             return
         }
-        let mapped = ChatMessage.fromAgentMessage(msg)
-        switch mapped.role {
+        let row = ChatViewModel.identified(ChatViewModel.mapped(obj, msg), key: key)
+        switch row.role {
         case .tool:
             return
         case .user:
-            upsertUserEcho(mapped)
+            store.upsertLive(row)
         case .assistant:
             status.apply(.activity(nil))
-            beginAssistant(mapped)
+            store.start(row)
         }
     }
 
@@ -1377,6 +1497,7 @@ final class ChatViewModel: ObservableObject {
         if let usageJson = obj["usage"] as? [String: Any], let usage = SessionUsage(json: usageJson) {
             status.setUsage(usage)
         }
+        let keyed = noteKeyed(obj)
         let msg = obj["message"] as? [String: Any]
         if let msg, ChatViewModel.isToolMessage(msg) {
             status.apply(.activity(nil))
@@ -1392,7 +1513,16 @@ final class ChatViewModel: ObservableObject {
         switch type {
         case "text_delta":
             status.apply(.activity(AgentActivity(kind: .writing)))
-            if let delta = ev["delta"] as? String, !delta.isEmpty { accumulate(delta) }
+            guard let delta = ev["delta"] as? String, !delta.isEmpty else { break }
+            if let key = ChatViewModel.eventKey(obj, nil) {
+                let number = (obj["offset"] as? NSNumber) ?? (ev["offset"] as? NSNumber)
+                store.applyDelta(key: key, offset: number.map { Int($0.int64Value) }, delta: delta)
+            } else if !keyed {
+                // Pre-§13 server: deltas belong to the last started message.
+                store.appendLegacyDelta(delta)
+            }
+            // `key: null` (§13: server saw no message_start) → status only;
+            // the keyed message_end / snapshot brings the text.
         case "thinking_start", "thinking_delta":
             status.apply(.activity(AgentActivity(kind: .thinking)))
         case "toolcall_start":
@@ -1400,54 +1530,83 @@ final class ChatViewModel: ObservableObject {
                 ?? ((ev["toolCall"] as? [String: Any])?["name"] as? String)
             status.apply(.activity(AgentActivity(kind: .toolcall, tool: name)))
         case "done", "error":
-            flushPendingDelta()
-            if let msg { finalizeAssistant(ChatMessage.fromAgentMessage(msg)) }
+            if let msg { finishAssistant(obj, msg) }
         default:
             status.apply(.activity(nil))
         }
     }
 
     private func handleMessageEnd(_ obj: [String: Any]) {
-        flushPendingDelta()
+        _ = noteKeyed(obj)
         guard let msg = obj["message"] as? [String: Any] else {
-            streamingId = nil
+            // Defensive: a keyed end carrying only the canonical text.
+            if let key = obj["key"] as? String, let text = obj["text"] as? String {
+                store.finish(ChatMessage(role: .assistant, text: text, thinking: nil, toolCalls: [],
+                                         isError: false, toolName: nil, isSystemNote: false, model: nil,
+                                         errorMessage: nil, timestamp: nil, key: key))
+            }
             return
         }
+        let key = ChatViewModel.eventKey(obj, msg)
         if let qaRow = ChatViewModel.qaMessage(event: obj, message: msg) {
-            upsertQA(qaRow)
+            store.upsertLive(ChatViewModel.identified(qaRow, key: key))
             return
         }
         if ChatViewModel.isToolMessage(msg) { return }
-        let mapped = ChatMessage.fromAgentMessage(msg)
-        switch mapped.role {
+        let row = ChatViewModel.mapped(obj, msg)
+        switch row.role {
         case .tool:
             return
         case .user:
-            upsertUserEcho(mapped)
+            store.upsertLive(ChatViewModel.identified(row, key: key))
         case .assistant:
-            finalizeAssistant(mapped)
+            finishAssistant(obj, msg)
         }
     }
 
+    /// message_end / done / error: the server's top-level `text` (§13: the
+    /// SAME function as the history mapping) replaces the streamed text;
+    /// older servers → the mapped message text.
+    private func finishAssistant(_ obj: [String: Any], _ msg: [String: Any]) {
+        var row = ChatViewModel.identified(ChatViewModel.mapped(obj, msg),
+                                           key: ChatViewModel.eventKey(obj, msg))
+        if let text = obj["text"] as? String { row.text = ChatMessage.collapseBlankLines(text) }
+        guard TranscriptStore.hasIdentity(row) else {
+            // No key, no timestamp, no entry id: nothing to anchor it to —
+            // never invent a floating row; history brings it.
+            requestRefresh()
+            return
+        }
+        store.finish(row)
+    }
+
+    /// §13 `message_snapshot {key, role, timestamp, text, streaming}`: the
+    /// in-progress message's text so far, authoritative.
+    private func handleMessageSnapshot(_ obj: [String: Any]) {
+        _ = noteKeyed(obj)
+        guard let key = obj["key"] as? String, let text = obj["text"] as? String else { return }
+        let timestamp = (obj["timestamp"] as? NSNumber).map { Int($0.int64Value) }
+        if (obj["streaming"] as? Bool) == false {
+            store.finish(ChatMessage(role: .assistant, text: text, thinking: nil, toolCalls: [],
+                                     isError: false, toolName: nil, isSystemNote: false, model: nil,
+                                     errorMessage: nil, timestamp: timestamp, key: key))
+        } else {
+            store.snapshot(key: key, timestamp: timestamp, text: text)
+        }
+    }
+
+    /// Read-only tailer rows (no transport): persisted rows, upserted by
+    /// identity in arrival order.
     private func handleFileUpdate(_ obj: [String: Any]) {
         // v1 hint only; ignored once v2 agent_status frames are seen.
         if let working = obj["working"] as? Bool { status.apply(.legacyBusy(working)) }
         guard let msg = obj["message"] as? [String: Any] else { return }
+        let keyed = noteKeyed(obj) || msg.keys.contains("key")
+        if keyed, !serverKeyed { serverKeyed = true }
         let mapped = ChatViewModel.qaMessage(event: obj, message: msg) ?? ChatMessage.fromAgentMessage(msg)
         guard mapped.role != .tool || mapped.qa != nil else { return }
-        // Batch bursts (open-time replay + live host writes) into one merge.
-        pendingFileMessages.append(mapped)
-        guard fileFlushTask == nil else { return }
-        fileFlushTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 120_000_000)
-            guard !Task.isCancelled, let self else { return }
-            self.fileFlushTask = nil
-            let batch = self.pendingFileMessages
-            self.pendingFileMessages = []
-            ChatMerger.merge(&self.messages, batch, placement: .tail)
-            ChatMerger.pruneFragments(&self.messages, keep: self.streamingId)
-            self.evictLiveTailIfNeeded()
-        }
+        let row = ChatViewModel.identified(mapped, key: ChatViewModel.eventKey(obj, msg))
+        store.merge([row], placement: .newer, live: true)
     }
 
     private func handleQueueUpdate(_ obj: [String: Any]) {
@@ -1464,19 +1623,6 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Row upserts (identity-preserving)
-
-    private func upsertUserEcho(_ mapped: ChatMessage) {
-        guard mapped.text.hasVisibleCharacters else { return }
-        ChatMerger.merge(&messages, [mapped], placement: .tail)
-    }
-
-    /// Q&A rows (contract §9) arrive on message_start AND message_end (and
-    /// later file_update / history) — identity-merged into one row.
-    private func upsertQA(_ mapped: ChatMessage) {
-        ChatMerger.merge(&messages, [mapped], placement: .tail)
-    }
-
     /// The `ask_user_question` result as a Q&A row when the server attached
     /// `qa` (on the message copy or the event itself); nil otherwise —
     /// older servers keep today's behaviour (tool rows hidden).
@@ -1486,85 +1632,6 @@ final class ChatViewModel: ObservableObject {
         guard mapped.role == .tool else { return nil }
         if mapped.qa == nil { mapped.qa = QAInfo(json: event["qa"]) }
         return mapped.qa == nil ? nil : mapped
-    }
-
-    private func streamingIndex() -> Int? {
-        guard let sid = streamingId else { return nil }
-        if let last = messages.indices.last, messages[last].id == sid { return last }
-        return messages.lastIndex(where: { $0.id == sid })
-    }
-
-    /// Find or create the assistant bubble receiving streamed content.
-    private func ensureStreamingIndex() -> Int {
-        if let i = streamingIndex() { return i }
-        let bubble = ChatMessage(role: .assistant, text: "", thinking: nil, toolCalls: [],
-                                 isError: false, toolName: nil, isSystemNote: false,
-                                 model: nil, errorMessage: nil, timestamp: nil)
-        messages.append(bubble)
-        streamingId = bubble.id
-        return messages.count - 1
-    }
-
-    private func beginAssistant(_ mapped: ChatMessage) {
-        flushPendingDelta()
-        if let i = streamingIndex() {
-            // Previous message never ended: drop it if it never got content.
-            if messages[i].entryId == nil && !messages[i].text.hasVisibleCharacters && !messages[i].isError {
-                messages.remove(at: i)
-            }
-            streamingId = nil
-        }
-        ChatMerger.dropOrphanBubbles(&messages, streamingId: nil)
-        if let eid = mapped.entryId, let i = messages.lastIndex(where: { $0.entryId == eid }) {
-            streamingId = messages[i].id
-            return
-        }
-        // The row keeps this id for its whole lifecycle (streaming → final →
-        // server copy): ChatMerger.absorb never replaces ids.
-        messages.append(mapped)
-        streamingId = mapped.id
-    }
-
-    /// Fold the canonical message_end copy into the streaming bubble WITHOUT
-    /// changing its id (no row identity churn → no cell recreation/jump).
-    private func finalizeAssistant(_ mapped: ChatMessage) {
-        let sIdx = streamingIndex()
-        let eIdx = mapped.entryId.flatMap { eid in messages.lastIndex(where: { $0.entryId == eid }) }
-        if let e = eIdx, let s = sIdx, e != s {
-            // The canonical row already arrived (refresh/file_update) — fold
-            // into it and drop the duplicate bubble.
-            messages[e] = ChatMerger.absorb(messages[e], mapped)
-            messages.remove(at: s)
-        } else if let i = eIdx ?? sIdx {
-            messages[i] = ChatMerger.absorb(messages[i], mapped)
-        } else {
-            ChatMerger.merge(&messages, [mapped], placement: .tail)
-        }
-        streamingId = nil
-        ChatMerger.pruneFragments(&messages, keep: nil)
-        ChatMerger.dropOrphanBubbles(&messages, streamingId: nil)
-    }
-
-    /// Batch streamed text deltas: append to a buffer, flush ~90ms later.
-    private func accumulate(_ delta: String) {
-        pendingDelta += delta
-        guard flushTask == nil else { return }
-        flushTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 90_000_000)
-            guard !Task.isCancelled, let self else { return }
-            self.flushTask = nil
-            self.flushPendingDelta()
-        }
-    }
-
-    private func flushPendingDelta() {
-        flushTask?.cancel()
-        flushTask = nil
-        guard !pendingDelta.isEmpty else { return }
-        let delta = pendingDelta
-        pendingDelta = ""
-        let i = ensureStreamingIndex()
-        messages[i].text += delta
     }
 
     /// pi marks tool results with a toolName (roles: toolResult/assistant/user).
