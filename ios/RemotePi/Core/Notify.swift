@@ -127,6 +127,8 @@ struct NotifySettings: Equatable {
     var hasDeviceKey: Bool
     var encryption: Encryption
     var level: String
+    /// Skip turn ends of pi-subagents child sessions (server default true).
+    var skipSubagents: Bool
 
     struct Encryption: Equatable {
         var enabled: Bool
@@ -148,12 +150,13 @@ struct NotifySettings: Equatable {
 
     init(enabled: Bool = false, barkServer: String = NotifySettings.defaultBarkServer,
          hasDeviceKey: Bool = false, encryption: Encryption = Encryption(),
-         level: String = BarkLevel.active.rawValue) {
+         level: String = BarkLevel.active.rawValue, skipSubagents: Bool = true) {
         self.enabled = enabled
         self.barkServer = barkServer
         self.hasDeviceKey = hasDeviceKey
         self.encryption = encryption
         self.level = level
+        self.skipSubagents = skipSubagents
     }
 
     var algorithm: BarkAlgorithm? { BarkAlgorithm(wire: encryption.algorithm) }
@@ -163,7 +166,7 @@ struct NotifySettings: Equatable {
 
 extension NotifySettings: Decodable {
     private enum CodingKeys: String, CodingKey {
-        case enabled, barkServer, hasDeviceKey, encryption, level
+        case enabled, barkServer, hasDeviceKey, encryption, level, skipSubagents
         // Tolerated wrappers: `{notify:{…}}` / `{settings:{…}}`.
         case notify, settings
     }
@@ -188,6 +191,7 @@ extension NotifySettings: Decodable {
         hasDeviceKey = c.lossyBool(.hasDeviceKey) ?? false
         encryption = (try? c.decodeIfPresent(Encryption.self, forKey: .encryption)) ?? Encryption()
         level = c.lossyString(.level) ?? BarkLevel.active.rawValue
+        skipSubagents = c.lossyBool(.skipSubagents) ?? true
     }
 }
 
@@ -215,6 +219,7 @@ struct NotifySettingsPatch: Encodable, Equatable {
     var deviceKey: String?
     var encryption: EncryptionPatch?
     var level: String?
+    var skipSubagents: Bool?
 
     struct EncryptionPatch: Encodable, Equatable {
         var enabled: Bool?
@@ -230,7 +235,7 @@ struct NotifySettingsPatch: Encodable, Equatable {
 
     var isEmpty: Bool {
         enabled == nil && barkServer == nil && deviceKey == nil
-            && (encryption?.isEmpty ?? true) && level == nil
+            && (encryption?.isEmpty ?? true) && level == nil && skipSubagents == nil
     }
 }
 
@@ -386,6 +391,7 @@ struct NotifyDraft: Equatable {
     var key = ""
     var iv = ""
     var level: BarkLevel = .active
+    var skipSubagents = true
 
     init() {}
 
@@ -396,6 +402,7 @@ struct NotifyDraft: Equatable {
         algorithm = settings.algorithm ?? .aes128
         mode = settings.mode ?? .cbc
         level = settings.parsedLevel ?? .active
+        skipSubagents = settings.skipSubagents
     }
 
     /// Problems that block saving. Notes on the server (§14 impl): it
@@ -459,6 +466,7 @@ struct NotifyDraft: Equatable {
         if !enc.isEmpty { patch.encryption = enc }
 
         if saved.parsedLevel != level { patch.level = level.rawValue }
+        if saved.skipSubagents != skipSubagents { patch.skipSubagents = skipSubagents }
         return patch
     }
 }

@@ -321,6 +321,13 @@ struct NotificationSettingsView: View {
         }
 
         Section {
+            Toggle("Skip subagent sessions", isOn: $model.draft.skipSubagents)
+                .accessibilityHint("When on, sessions started by subagents don't notify")
+        } footer: {
+            Text("Only notify for your own sessions (and forks) — not for the helper sessions subagents run.")
+        }
+
+        Section {
             Picker("Level", selection: $model.draft.level) {
                 ForEach(model.levelOptions) { Text($0.label).tag($0) }
             }
