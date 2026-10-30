@@ -26,6 +26,12 @@ targets:
         CFBundleDisplayName: Remote Pi
         CFBundleShortVersionString: "5.20"
         CFBundleVersion: "60"
+        # Contract §14: Bark turn-end pushes open remotepi://session/<id>.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.aiching.remotepi
+            CFBundleTypeRole: Viewer
+            CFBundleURLSchemes:
+              - remotepi
         LSRequiresIPhoneOS: true
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true

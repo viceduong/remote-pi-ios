@@ -24,6 +24,7 @@ struct SessionListView: View {
     @State private var serverInfo: ServerInfo?
     @State private var openSession: SessionSummary?
     @State private var loadGeneration = 0
+    @ObservedObject private var deepLinks = DeepLinkRouter.shared
 
     private var client: APIClient {
         APIClient(baseURL: server.url ?? URL(string: "http://localhost")!, token: server.token)
@@ -214,6 +215,11 @@ struct SessionListView: View {
                 EmptyView()
             }
         )
+        .onReceive(deepLinks.$openRequest) { request in
+            guard let request, request.serverId == server.id else { return }
+            // Deferred: `$openRequest` fires in willSet (see ServerListView).
+            Task { @MainActor in openDeepLink(request) }
+        }
         .alert("Error", isPresented: Binding(
             get: { errorMessage != nil },
             set: { if !$0 { errorMessage = nil } }
@@ -329,6 +335,25 @@ struct SessionListView: View {
         sessions.removeAll { $0.id == session.id }
         sessions.insert(session, at: 0)
         openSession = session
+    }
+
+    /// `remotepi://session/<id>` resolved by ServerListView for this server:
+    /// push its chat (replacing another open chat). Short delays let a push
+    /// of this list / a pop of the old chat finish — iOS 15 drops a
+    /// NavigationLink activation that lands mid-transition.
+    private func openDeepLink(_ request: DeepLinkRouter.OpenRequest) {
+        guard deepLinks.openRequest?.id == request.id else { return }  // already handled
+        deepLinks.openRequest = nil
+        showNewSession = false
+        errorMessage = nil
+        let session = request.session
+        if openSession?.id == session.id { return }
+        let hadChat = openSession != nil
+        openSession = nil
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: hadChat ? 650_000_000 : 450_000_000)
+            openSession = session
+        }
     }
 
     private func delete(_ session: SessionSummary, force: Bool = false) {

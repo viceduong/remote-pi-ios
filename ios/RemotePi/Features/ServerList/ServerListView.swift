@@ -16,6 +16,8 @@ struct ServerListView: View {
     /// One-shot: with a single configured host, jump straight into it instead
     /// of showing a list of one. Never re-fires after the user backs out.
     @State private var didAutoSelect = false
+    @ObservedObject private var deepLinks = DeepLinkRouter.shared
+    @State private var deepLinkTask: Task<Void, Never>?
 
     var body: some View {
         List {
@@ -79,8 +81,9 @@ struct ServerListView: View {
                 Button {
                     showSettings = true
                 } label: {
-                    Image(systemName: "textformat.size")
+                    Image(systemName: "gearshape")
                 }
+                .accessibilityLabel("Settings")
                 Button {
                     showAdd = true
                 } label: {
@@ -89,7 +92,7 @@ struct ServerListView: View {
             }
         }
         .sheet(isPresented: $showSettings) {
-            SettingsView()
+            SettingsView(servers: store.servers)
         }
         .sheet(isPresented: $showAdd) {
             ServerEditView(store: store)
@@ -109,6 +112,15 @@ struct ServerListView: View {
                 EmptyView()
             }
         )
+        .onReceive(deepLinks.$pendingSessionId) { id in
+            guard let id else { return }
+            // Deferred: `$pendingSessionId` fires in willSet, so clearing it
+            // here synchronously would be overwritten by the in-flight set.
+            Task { @MainActor in
+                guard deepLinks.pendingSessionId == id else { return }
+                openDeepLink(sessionId: id)
+            }
+        }
         .alert("Connection failed", isPresented: Binding(
             get: { errorMessage != nil },
             set: { if !$0 { errorMessage = nil } }
@@ -121,10 +133,59 @@ struct ServerListView: View {
 
     /// Single-host convenience: skip the one-row list and connect immediately.
     private func autoSelectSingleHost() {
-        guard !didAutoSelect, store.servers.count == 1,
+        guard !didAutoSelect, deepLinks.pendingSessionId == nil, store.servers.count == 1,
               let only = store.servers.first, showSessionsFor == nil else { return }
         didAutoSelect = true
         connect(only)
+    }
+
+    /// `remotepi://session/<id>`: look the session up on the selected /
+    /// last-used server, then navigate server → sessions → chat. Not found
+    /// (or unreachable) → error banner.
+    private func openDeepLink(sessionId: String) {
+        deepLinks.pendingSessionId = nil
+        // A deep link supersedes the single-host auto-connect.
+        didAutoSelect = true
+        guard let server = store.preferredServer, let url = server.url else {
+            deepLinks.show("Add a server first — then open the notification again.", isError: true)
+            return
+        }
+        showSettings = false
+        showAdd = false
+        editingServer = nil
+        deepLinks.show("Opening session…", isError: false)
+        deepLinkTask?.cancel()
+        let client = APIClient(baseURL: url, token: server.token)
+        let serverName = server.name.isEmpty ? server.baseURL : server.name
+        deepLinkTask = Task {
+            do {
+                let session = try await client.fetchSession(sessionId)
+                guard !Task.isCancelled else { return }
+                deepLinks.dismissBanner()
+                store.selectedServer = server
+                deepLinks.openRequest = DeepLinkRouter.OpenRequest(serverId: server.id, session: session)
+                if showSessionsFor?.id == server.id {
+                    // Its SessionListView is on the stack and opens the chat.
+                    return
+                }
+                if showSessionsFor != nil {
+                    // Another server's stack is showing: pop, then push
+                    // (pop + push in one pass is unreliable on iOS 15).
+                    showSessionsFor = nil
+                    try? await Task.sleep(nanoseconds: 650_000_000)
+                    guard !Task.isCancelled else { return }
+                }
+                showSessionsFor = server
+            } catch {
+                guard !APIClient.isCancellation(error), !Task.isCancelled else { return }
+                if case APIError.http(404, _, _) = error {
+                    deepLinks.show("Session not found on \(serverName).", isError: true)
+                } else {
+                    deepLinks.show("Couldn't open the session on \(serverName): \(error.localizedDescription)",
+                                   isError: true)
+                }
+            }
+        }
     }
 
     private func connect(_ server: ServerConfig) {

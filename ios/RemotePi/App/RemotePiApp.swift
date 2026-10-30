@@ -5,6 +5,7 @@ import SwiftUI
 struct RemotePiApp: App {
     @StateObject private var serverStore = ServerStore()
     @AppStorage("themeName") private var themeName = "darkGrey"
+    private let deepLinks = DeepLinkRouter.shared
 
     var body: some Scene {
         WindowGroup {
@@ -13,6 +14,10 @@ struct RemotePiApp: App {
                     .navigationTitle("Remote Pi")
             }
             .navigationViewStyle(.stack)
+            // Contract §14: `remotepi://session/<id>` from a Bark notification
+            // (warm or cold launch) → open that session.
+            .onOpenURL { url in deepLinks.handle(url) }
+            .overlay(alignment: .top) { DeepLinkBannerView(router: deepLinks) }
             .environmentObject(serverStore)
             .environment(\.theme, AppTheme.named(themeName))
             .preferredColorScheme(AppTheme.named(themeName).scheme)

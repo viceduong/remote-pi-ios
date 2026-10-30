@@ -6,9 +6,27 @@ import Security
 @MainActor
 final class ServerStore: ObservableObject {
     @Published private(set) var servers: [ServerConfig] = []
-    @Published var selectedServer: ServerConfig?
+    /// The server the user last connected to (persisted, so a cold-launch
+    /// deep link resolves against the last-used server).
+    @Published var selectedServer: ServerConfig? {
+        didSet {
+            if let id = selectedServer?.id {
+                UserDefaults.standard.set(id, forKey: Self.lastUsedKey)
+            }
+        }
+    }
 
     private static let key = "remotePi.servers"
+    private static let lastUsedKey = "remotePi.lastServerId"
+
+    /// Target for `remotepi://session/<id>`: the selected / last-used server
+    /// (current profile, so an edited token is used), else the first one.
+    var preferredServer: ServerConfig? {
+        if let selected = selectedServer, let current = servers.first(where: { $0.id == selected.id }) {
+            return current
+        }
+        return servers.first
+    }
 
     init() {
         load()
@@ -22,6 +40,7 @@ final class ServerStore: ObservableObject {
     func update(_ server: ServerConfig) {
         if let idx = servers.firstIndex(where: { $0.id == server.id }) {
             servers[idx] = server
+            if selectedServer?.id == server.id { selectedServer = server }
             save()
         }
     }
@@ -50,7 +69,8 @@ final class ServerStore: ObservableObject {
             return server
         }
         save()
-        selectedServer = servers.first
+        let lastUsed = UserDefaults.standard.string(forKey: Self.lastUsedKey)
+        selectedServer = servers.first(where: { $0.id == lastUsed }) ?? servers.first
     }
 
     private func save() {

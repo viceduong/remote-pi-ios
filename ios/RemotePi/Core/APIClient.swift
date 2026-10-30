@@ -400,7 +400,37 @@ struct APIClient {
     func abortTurn(_ id: String) async throws {
         try await postNoResponse("/api/sessions/\(id)/abort")
     }
+
+    // MARK: - Contract §14 notifications (Bark)
+
+    /// `GET /api/notify`. An older server answers 404 (→ `APIError.http(404, …)`).
+    func notifySettings() async throws -> NotifySettings {
+        try await get("/api/notify")
+    }
+
+    /// `PUT /api/notify` partial update. The response body is not relied on
+    /// (callers re-GET the settings), so any 2xx is success.
+    func updateNotifySettings(_ patch: NotifySettingsPatch) async throws {
+        _ = try await send(makeRequest("/api/notify", method: "PUT", body: patch))
+    }
+
+    /// `POST /api/notify/test` → `{ok, status, error?}`. A result body is
+    /// returned even on a non-2xx status (Bark rejected the push); anything
+    /// else (old server 404, proxy page) throws `APIError.http`.
+    func sendTestNotification() async throws -> NotifyTestResult {
+        let (data, status) = try await sendRaw(makeRequest("/api/notify/test", method: "POST"))
+        if !data.isEmpty, let result = try? JSONDecoder().decode(NotifyTestResult.self, from: data) {
+            return result
+        }
+        guard (200...299).contains(status) else {
+            throw Self.httpError(status: status, data: data)
+        }
+        throw APIError.decoding("unexpected test response")
+    }
 }
+
+/// Contract §14 endpoints used by the Notifications settings screen.
+extension APIClient: NotifyService {}
 
 /// Contract §12 endpoints used by the new-session sheet.
 extension APIClient: WorkdirService {}
