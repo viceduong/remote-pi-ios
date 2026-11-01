@@ -337,8 +337,26 @@ struct APIClient {
         return wrapper.items
     }
 
+    /// `DELETE /api/sessions/:id/queue/:itemId`. Contract §15: also cancels a
+    /// `running` item delivered as a steer whose echo has not arrived (pi
+    /// still holds it); 409 `already_delivered` when pi already took it, 502
+    /// when the transport can't clear pi's queue. Pre-§15 servers answer 404
+    /// for anything that is not still `queued`.
     func cancelQueued(_ id: String, itemId: String) async throws {
         try await delete("/api/sessions/\(id)/queue/\(itemId)")
+    }
+
+    /// Contract §15: `DELETE /api/sessions/:id/queue/by-client/:clientMessageId`
+    /// — cancel a send whose POST response never arrived (queued or steered).
+    /// 404 when the server doesn't know the id (or predates §15); same 409 /
+    /// 502 semantics as `cancelQueued`.
+    func cancelQueuedByClient(_ id: String, clientMessageId: String) async throws {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/?#")
+        guard let encoded = clientMessageId.addingPercentEncoding(withAllowedCharacters: allowed) else {
+            throw APIError.invalidURL
+        }
+        try await delete("/api/sessions/\(id)/queue/by-client/\(encoded)")
     }
 
     /// Contract §10: promote a queued item to immediate delivery, injecting it
@@ -434,3 +452,15 @@ extension APIClient: NotifyService {}
 
 /// Contract §12 endpoints used by the new-session sheet.
 extension APIClient: WorkdirService {}
+
+/// Send / queue endpoints the chat view model drives (injectable so tests
+/// can stub delivery and cancellation).
+protocol ChatQueueService {
+    func sendTurn(_ id: String, message: String, force: Bool,
+                  clientMessageId: String?) async throws -> TurnResponse
+    func fetchQueue(_ id: String) async throws -> [QueueItem]
+    func cancelQueued(_ id: String, itemId: String) async throws
+    func cancelQueuedByClient(_ id: String, clientMessageId: String) async throws
+}
+
+extension APIClient: ChatQueueService {}

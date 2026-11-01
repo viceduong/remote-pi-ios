@@ -298,7 +298,11 @@ enum TranscriptRenderer {
             let label = item.statusText ?? ""
             let labelWidth = ceil((label as NSString).size(withAttributes: [.font: style.headerFont]).width)
             let buttonCount = (item.cancellable ? 1 : 0) + (item.canSteer ? 1 : 0)
-            let headerWidth = M.headerIcon + 5 + labelWidth + CGFloat(buttonCount) * (5 + M.headerButton)
+            // Clamped to the row: a long label ("waiting for agent · after
+            // current step" at large text sizes) truncates instead of
+            // pushing the header off the leading edge.
+            let headerWidth = min(max(0, width - 2 * M.hPad),
+                                  M.headerIcon + 5 + labelWidth + CGFloat(buttonCount) * (5 + M.headerButton))
             l.header = CGRect(x: width - M.hPad - headerWidth, y: M.vPad,
                               width: headerWidth, height: M.headerHeight)
             let maxBubble = max(60, width - 2 * M.hPad - M.userLeadingMin)

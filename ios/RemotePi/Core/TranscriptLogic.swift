@@ -68,14 +68,16 @@ struct TranscriptItem: Equatable {
     var text: String
     var entryId: String? = nil
     var streaming = false
-    /// Chip header ("queued · 2m", "sending", "waiting for connection").
+    /// Chip header ("queued · 2m", "sending…", "waiting for agent · after
+    /// current step", "waiting for connection").
     var statusText: String? = nil
     /// Chips/offline rows: whether the ✕ button is shown.
     var cancellable = false
     /// Queued chips with a server queue id: whether the "send now" (steer)
     /// button is shown. Uses the same `actionId` (the server queue id).
     var canSteer = false
-    /// Server queue item id (chips) or offline UUID string (offline rows).
+    /// Server queue item id or `pending:<clientMessageId>` (chips), or the
+    /// offline UUID string (offline rows).
     var actionId: String? = nil
     /// Q&A rows: the structured questions/answers (`text` is the copy text).
     var qa: QAInfo? = nil
@@ -92,7 +94,8 @@ struct QueueChip: Equatable {
     /// local "sending" chip and the server's queue item are the SAME row.
     let rowId: String
     let item: QueueItem
-    /// Server queue id usable for DELETE /queue/:id (nil = not cancellable).
+    /// Server queue id usable for DELETE /queue/:id (nil = not known yet: a
+    /// local send is then cancelled by its clientMessageId, §15).
     let serverId: String?
     let origin: Origin
 }

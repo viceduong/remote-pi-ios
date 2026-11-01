@@ -239,7 +239,7 @@ final class TranscriptCell: UITableViewCell {
             headerLabel.textColor = tint
             actionButton.tintColor = style.secondaryText
             actionButton.accessibilityLabel = item.kind == .queued
-                ? "Cancel queued message" : "Discard unsent message"
+                ? "Cancel pending message" : "Discard unsent message"
             steerButton.tintColor = style.accent
             steerButton.accessibilityLabel = "Send now"
             steerButton.accessibilityHint = "Interrupts the agent and sends this message immediately"

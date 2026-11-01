@@ -455,9 +455,9 @@ final class TranscriptReplayTests: XCTestCase {
         feed(vm, [queueUpdate(status: "queued")])
         let queued = try XCTUnwrap(chips(vm).first)
         XCTAssertTrue(queued.canSteer)
-        // Send now (§10): optimistic "sending", same row.
+        // Send now (§10): optimistic "sending…", same row.
         vm.steerQueued("srv-2")
-        XCTAssertEqual(chips(vm).map(\.statusText), ["sending"])
+        XCTAssertEqual(chips(vm).map(\.statusText), ["sending…"])
         XCTAssertEqual(chips(vm).map(\.id), [queued.id])
         feed(vm, [queueUpdate(status: "running")] + Array(deltas(Self.a2).dropFirst(2)) + [end(Self.a2)])
         XCTAssertEqual(chips(vm).count, 1, "still pending: its user row has not appeared yet")

@@ -96,11 +96,27 @@ final class ChatViewModel: ObservableObject {
     private var piQueue: [String] = [] { didSet { scheduleCommit() } }
     /// Sends in flight / acknowledged but not yet echoed as a user row.
     private var localPending: [QueueItem] = [] { didSet { scheduleCommit() } }
-    private var cancelledLocal = Set<String>()
+    /// clientMessageIds the user cancelled (✕) while their POST /turn was not
+    /// acknowledged yet; `deliver` honours them on the late ack or failure.
+    /// Value: the server side still has to be cancelled (false when a DELETE
+    /// by queue id already covers it — the ack is then just dropped).
+    private var cancelledLocal: [String: Bool] = [:]
+    /// The delivery task of each still-unacknowledged send (by clientMessageId),
+    /// so a ✕ on a "sending…" chip can abandon the request.
+    private var deliverTasks: [String: Task<Void, Never>] = [:]
+    /// ✕ bookkeeping (contract §15), keyed by `cancelKey`: the chip is hidden
+    /// optimistically from the tap until the server confirms (and its queue
+    /// drops the item), or shown again when the cancel fails.
+    private var cancelIntents: [String: CancelIntent] = [:]
+    /// Chips the server could not cancel any more (already handed to the
+    /// agent): no ✕ — the user-row echo will replace them. Keyed by `cancelKey`.
+    private var uncancellable = Set<String>()
     /// Locally-queued sends while offline (persisted, flushed on reconnect).
     private var offlinePending: [OfflineMessage] = [] { didSet { scheduleCommit() } }
 
     private let client: APIClient
+    /// Send / queue / cancel endpoints (the client itself; stubbed in tests).
+    private let queueService: any ChatQueueService
     private let sessionId: String
     private let offlineStore: OfflineQueueStore
     private var eventSource: EventSource?
@@ -130,8 +146,9 @@ final class ChatViewModel: ObservableObject {
     private var answeringQuestionId: String?
     /// Send-now (§10) per server queue id: `.distantFuture` while the POST is
     /// in flight, then the acceptance time. While present the item renders
-    /// as running ("sending", no buttons) even if a lagging `queue_update`
-    /// still reports it `queued` — no flash back, no double steer.
+    /// as "sending…" / running (no ⚡, still ✕) even if a lagging
+    /// `queue_update` still reports it `queued` — no flash back, no double
+    /// steer.
     private var steering: [String: Date] = [:]
     /// How long an accepted steer keeps overriding a stale `queued` status.
     private static let steerGrace: TimeInterval = 30
@@ -158,8 +175,10 @@ final class ChatViewModel: ObservableObject {
     private var lastCacheSignature: Int?
     private var pendingCacheSignature: Int?
 
-    init(client: APIClient, sessionId: String, initialModel: String? = nil) {
+    init(client: APIClient, sessionId: String, initialModel: String? = nil,
+         queueService: (any ChatQueueService)? = nil) {
         self.client = client
+        self.queueService = queueService ?? client
         self.sessionId = sessionId
         self.offlineStore = OfflineQueueStore(sessionId: sessionId)
         self.currentModel = ModelRef(summary: initialModel)
@@ -215,6 +234,7 @@ final class ChatViewModel: ObservableObject {
         // offline outbox (same clientMessageId → idempotent retry).
         for task in ownedTasks.values { task.cancel() }
         ownedTasks.removeAll()
+        deliverTasks.removeAll()
         networkCancellable = nil
         status.onBecameIdle = nil
         saveCacheNow()
@@ -251,13 +271,15 @@ final class ChatViewModel: ObservableObject {
     // MARK: - Task ownership
 
     /// Run `operation` as a task owned (and cancelled) by this view model.
-    private func spawn(_ operation: @escaping @MainActor () async -> Void) {
+    @discardableResult
+    private func spawn(_ operation: @escaping @MainActor () async -> Void) -> Task<Void, Never> {
         let key = UUID()
         let task = Task { [weak self] in
             await operation()
             self?.ownedTasks[key] = nil
         }
         ownedTasks[key] = task
+        return task
     }
 
     private func surface(_ error: Error) {
@@ -325,6 +347,7 @@ final class ChatViewModel: ObservableObject {
 
         expireStaleLocalPending()
         pruneSteering()
+        pruneCancels()
         let reconciled = QueueReconciler.reconcile(localPending: steered(localPending),
                                                    server: steered(serverQueue),
                                                    piNative: piQueue, messages: messages,
@@ -344,13 +367,17 @@ final class ChatViewModel: ObservableObject {
         var chipClientIds = Set<String>()
         for chip in reconciled.chips {
             if let cid = chip.item.clientMessageId { chipClientIds.insert(cid) }
+            // ✕ tapped: hidden until the server confirms (or the cancel fails).
+            if isHiddenByCancel(chip) { continue }
             let actions = ChatViewModel.chipActions(chip)
+            let blocked = uncancellable.contains(ChatViewModel.cancelKey(clientMessageId: chip.item.clientMessageId,
+                                                                         serverId: chip.serverId ?? chip.item.id))
             items.append(TranscriptItem(
                 id: chip.rowId, kind: .queued, text: chip.item.message,
                 statusText: ChatViewModel.chipStatus(chip.item),
-                cancellable: actions.cancellable,
+                cancellable: actions.cancellable && !blocked,
                 canSteer: actions.steerable,
-                actionId: chip.serverId))
+                actionId: ChatViewModel.chipActionId(chip)))
         }
         for o in offlinePending where !chipClientIds.contains(o.clientMessageId) {
             items.append(TranscriptItem(
@@ -402,25 +429,52 @@ final class ChatViewModel: ObservableObject {
                        text: question.copyText, actionId: question.requestId, question: question)
     }
 
-    /// A chip can be cancelled / steered only when it is a still-`queued`
-    /// server item with a server queue id: pi-native rows (no id) and local
-    /// "sending" chips that have not reached the server yet are neither. Both
-    /// actions key off the same server queue id (`chip.serverId`).
+    /// Every pending chip of ours can be cancelled (✕, contract §15): a local
+    /// "sending…" chip (POST not acknowledged — addressed by its
+    /// clientMessageId), a `queued` item, and a `running` item pi still holds
+    /// as a steer. Send-now (⚡) only applies to a still-`queued` server item.
+    /// pi-native rows (texts from pi's own queue, no id) have neither.
     nonisolated static func chipActions(_ chip: QueueChip) -> (cancellable: Bool, steerable: Bool) {
-        let eligible = chip.item.status == "queued" && chip.origin != .piNative && chip.serverId != nil
-        return (eligible, eligible)
+        guard chip.origin != .piNative else { return (false, false) }
+        let status = chip.item.status
+        let pending = status == "queued" || status == "running" || status == "sending"
+        let addressable = chip.serverId != nil || chip.item.clientMessageId != nil
+        return (pending && addressable, status == "queued" && chip.serverId != nil)
     }
 
-    nonisolated private static func chipStatus(_ item: QueueItem) -> String {
-        if item.status != "queued" { return "sending" }
-        var parts = ["queued"]
-        if let at = item.queuedAt {
-            let elapsed = Int(Date().timeIntervalSince1970 * 1000 - TimeInterval(at)) / 1000
-            if elapsed >= 60 {
-                parts.append(elapsed >= 3600 ? "\(elapsed / 3600)h" : "\(elapsed / 60)m")
+    /// Prefix of the action id of a chip the server hasn't given an id yet.
+    nonisolated static var pendingActionPrefix: String { "pending:" }
+
+    /// The id the chip's buttons act on: the server queue id when known,
+    /// else `pending:<clientMessageId>` (cancel by clientMessageId).
+    nonisolated static func chipActionId(_ chip: QueueChip) -> String? {
+        if let serverId = chip.serverId { return serverId }
+        guard chip.origin != .piNative, let cid = chip.item.clientMessageId else { return nil }
+        return pendingActionPrefix + cid
+    }
+
+    /// Chip header label:
+    /// - "sending…" — POST (or send-now) not acknowledged yet;
+    /// - "queued · 2m" — waiting in the server queue;
+    /// - "waiting for agent · after current step" — handed to pi (running /
+    ///   steered), which takes it when the current step ends; the user-row
+    ///   echo replaces the chip.
+    nonisolated static func chipStatus(_ item: QueueItem, now: Date = Date()) -> String {
+        switch item.status {
+        case "queued":
+            var parts = ["queued"]
+            if let at = item.queuedAt {
+                let elapsed = Int(now.timeIntervalSince1970 * 1000 - TimeInterval(at)) / 1000
+                if elapsed >= 60 {
+                    parts.append(elapsed >= 3600 ? "\(elapsed / 3600)h" : "\(elapsed / 60)m")
+                }
             }
+            return parts.joined(separator: " · ")
+        case "sending":
+            return "sending…"
+        default:
+            return "waiting for agent · after current step"
         }
-        return parts.joined(separator: " · ")
     }
 
     private static var nowMs: Int { Int(Date().timeIntervalSince1970 * 1000) }
@@ -736,8 +790,11 @@ final class ChatViewModel: ObservableObject {
                                       message: trimmed, status: "sending", queuedAt: ChatViewModel.nowMs))
         status.apply(.optimisticSend)
         scrollToBottomRequests.send(())
-        spawn { [weak self] in
+        // Runs after this synchronous call returns (main-actor task), so the
+        // entry below is always registered before the task can clear it.
+        deliverTasks[clientMessageId] = spawn { [weak self] in
             await self?.deliver(trimmed, clientMessageId: clientMessageId, force: false)
+            self?.deliverTasks[clientMessageId] = nil
         }
     }
 
@@ -748,13 +805,15 @@ final class ChatViewModel: ObservableObject {
 
     private func deliver(_ text: String, clientMessageId: String, force: Bool) async {
         do {
-            let resp = try await client.sendTurn(sessionId, message: text, force: force,
-                                                 clientMessageId: clientMessageId)
+            let resp = try await queueService.sendTurn(sessionId, message: text, force: force,
+                                                       clientMessageId: clientMessageId)
             let delivered = resp.dispatched == true || !resp.queued
-            if cancelledLocal.remove(clientMessageId) != nil {
+            if let needsServerCancel = cancelledLocal.removeValue(forKey: clientMessageId) {
+                // ✕ was tapped before this (late) ack: the server has the
+                // message now — queued or already handed to pi — cancel it.
                 localPending.removeAll { $0.clientMessageId == clientMessageId }
-                if !delivered, let qid = resp.queueItemId {
-                    try? await client.cancelQueued(sessionId, itemId: qid)
+                if needsServerCancel {
+                    resolveCancelledSend(clientMessageId, reachedServer: true, queueItemId: resp.queueItemId)
                 }
                 return
             }
@@ -766,6 +825,18 @@ final class ChatViewModel: ObservableObject {
             if connectionState != .connected { await refreshFromServer() }
         } catch {
             localPending.removeAll { $0.clientMessageId == clientMessageId }
+            if let needsServerCancel = cancelledLocal.removeValue(forKey: clientMessageId) {
+                // Cancelled before any ack (the ✕ abandoned the request, or it
+                // failed). A request that was lost in flight may still have
+                // reached the server: cancel it there by clientMessageId. A
+                // server rejection means it never got queued — nothing to undo.
+                // Never the offline outbox: the user cancelled it.
+                if needsServerCancel {
+                    resolveCancelledSend(clientMessageId, reachedServer: ChatViewModel.isLostRequest(error),
+                                         queueItemId: nil)
+                }
+                return
+            }
             status.apply(.clearOptimistic)
             if APIClient.isCancellation(error) {
                 // Owner went away mid-request. Keep the text: it retries with
@@ -831,22 +902,306 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    func cancelQueued(_ serverItemId: String) {
-        serverQueue.removeAll { $0.id == serverItemId }
-        if let local = localPending.first(where: { $0.id == serverItemId }), let cid = local.clientMessageId {
-            cancelledLocal.insert(cid)
-            localPending.removeAll { $0.id == serverItemId }
+    // MARK: - Cancel (✕ on a pending chip, contract §15)
+
+    /// One ✕ in progress / just confirmed.
+    struct CancelIntent {
+        let clientMessageId: String?
+        /// Server queue id once known (DELETE /queue/:id).
+        var serverId: String?
+        let text: String
+        /// A DELETE (or the late ack it waits for) is in flight.
+        var inFlight = true
+        /// The server didn't know the message yet (lost POST, by-client 404):
+        /// if it still shows up in the queue, it is cancelled then.
+        var awaitingServerItem = false
+        /// When the server confirmed the cancel.
+        var settledAt: Date?
+        let since = Date()
+    }
+
+    enum CancelOutcome {
+        case cancelled
+        /// 409 `already_delivered`: pi already took it — the echo follows.
+        case alreadyDelivered
+        /// 404: unknown id (pre-§15 server for a non-queued item, by-client
+        /// for a POST that never arrived, or an item that just settled).
+        case notFound
+        case failed(Error)
+    }
+
+    nonisolated static func cancelOutcome(for error: Error) -> CancelOutcome {
+        if case APIError.http(let code, _, let apiCode) = error {
+            if code == 409, apiCode == nil || apiCode == "already_delivered" { return .alreadyDelivered }
+            if code == 404 { return .notFound }
         }
-        spawn { [weak self] in
-            guard let self else { return }
-            do {
-                try await self.client.cancelQueued(self.sessionId, itemId: serverItemId)
-            } catch {
-                self.surface(error)
-                await self.loadQueue()
+        return .failed(error)
+    }
+
+    /// Identity of a chip for cancel bookkeeping: its clientMessageId (shared
+    /// by the local and server twins), else its server id.
+    nonisolated static func cancelKey(clientMessageId: String?, serverId: String?) -> String {
+        if let clientMessageId { return clientMessageId }
+        return "id:" + (serverId ?? "")
+    }
+
+    /// The request may have reached the server although no response came
+    /// back (abandoned / connection lost).
+    nonisolated static func isLostRequest(_ error: Error) -> Bool {
+        if APIClient.isCancellation(error) { return true }
+        if case APIError.offline = error { return true }
+        return false
+    }
+
+    /// Text shown when pi already took the message (409 / pre-§15 404).
+    nonisolated static var alreadyDeliveredInfo: String { "Already delivered to the agent" }
+
+    /// ✕ on a queue chip (`actionId` from `chipActionId`).
+    /// - `pending:<cid>` — a send without a server queue id: while its POST
+    ///   is unacknowledged the chip goes at once, the request is abandoned and
+    ///   `deliver` cancels it server-side if it got there anyway; an
+    ///   acknowledged one is cancelled by clientMessageId.
+    /// - a server queue id — `DELETE /queue/:id`, for `queued` items and (§15)
+    ///   `running` ones pi still holds as a steer. Optimistically hidden; a
+    ///   409 `already_delivered` brings the chip back without ✕ until its
+    ///   echo turns it into the user row; other failures roll back + error.
+    func cancelQueued(_ actionId: String) {
+        let prefix = ChatViewModel.pendingActionPrefix
+        if actionId.hasPrefix(prefix) {
+            cancelLocalSend(String(actionId.dropFirst(prefix.count)))
+        } else {
+            cancelServerItem(actionId)
+        }
+    }
+
+    private func cancelLocalSend(_ clientMessageId: String) {
+        guard let local = localPending.first(where: { $0.clientMessageId == clientMessageId }) else { return }
+        let key = ChatViewModel.cancelKey(clientMessageId: clientMessageId, serverId: nil)
+        guard cancelIntents[key] == nil else { return }
+        localPending.removeAll { $0.clientMessageId == clientMessageId }
+        cancelIntents[key] = CancelIntent(clientMessageId: clientMessageId, serverId: nil, text: local.message)
+        scheduleCommit()
+        if !localPending.contains(where: { $0.status == "sending" }) {
+            status.apply(.clearOptimistic)
+        }
+        if local.status == "sending", let task = deliverTasks[clientMessageId] {
+            // Not acknowledged: `deliver` resolves the cancel on the ack (late
+            // ack → server-side cancel) or the failure this triggers.
+            cancelledLocal[clientMessageId] = true
+            task.cancel()
+        } else {
+            // Acknowledged without a queue id (or its delivery task is gone).
+            spawn { [weak self] in
+                await self?.runCancel(key: key, serverId: nil, clientMessageId: clientMessageId,
+                                      fallbackServerId: nil, wasQueued: local.status == "queued")
             }
         }
     }
+
+    private func cancelServerItem(_ serverItemId: String) {
+        let server = serverQueue.first { $0.id == serverItemId }
+        let local = localPending.first { $0.id == serverItemId }
+        guard let item = server ?? local, item.isActive else { return }
+        let cid = item.clientMessageId
+        let key = ChatViewModel.cancelKey(clientMessageId: cid, serverId: serverItemId)
+        guard cancelIntents[key] == nil, !uncancellable.contains(key) else { return }
+        let wasQueued = item.status == "queued" && steering[serverItemId] == nil
+        cancelIntents[key] = CancelIntent(clientMessageId: cid, serverId: serverItemId, text: item.message)
+        // A local twin whose POST is still unacknowledged: its late ack must
+        // neither resurrect the chip nor go to the offline outbox (this
+        // DELETE covers the server side).
+        if let cid, let twin = localPending.first(where: { $0.clientMessageId == cid }) {
+            if twin.status == "sending", deliverTasks[cid] != nil { cancelledLocal[cid] = false }
+            localPending.removeAll { $0.clientMessageId == cid }
+        }
+        scheduleCommit()
+        spawn { [weak self] in
+            await self?.runCancel(key: key, serverId: serverItemId, clientMessageId: nil,
+                                  fallbackServerId: nil, wasQueued: wasQueued)
+        }
+    }
+
+    /// The ✕ of a send whose POST was unacknowledged at tap time, once the
+    /// POST resolved. If it (may have) reached the server — late ack, or
+    /// lost in flight — cancel it by clientMessageId (§15), falling back to
+    /// the acknowledged queue id on servers without the by-client route; a
+    /// server rejection leaves nothing to cancel. Runs the DELETE in its own
+    /// task: the delivery task may be the cancelled one. Nothing to do when a
+    /// server-chip ✕ (DELETE by queue id) already covers it.
+    private func resolveCancelledSend(_ clientMessageId: String, reachedServer: Bool, queueItemId: String?) {
+        let key = ChatViewModel.cancelKey(clientMessageId: clientMessageId, serverId: nil)
+        if let intent = cancelIntents[key], intent.serverId != nil { return }
+        guard reachedServer else {
+            dropCancelIntent(key)
+            return
+        }
+        if cancelIntents[key] == nil {
+            cancelIntents[key] = CancelIntent(clientMessageId: clientMessageId, serverId: nil, text: "")
+        }
+        spawn { [weak self] in
+            await self?.runCancel(key: key, serverId: nil, clientMessageId: clientMessageId,
+                                  fallbackServerId: queueItemId, wasQueued: false)
+        }
+    }
+
+    /// Perform the DELETE and settle the intent.
+    private func runCancel(key: String, serverId: String?, clientMessageId: String?,
+                           fallbackServerId: String?, wasQueued: Bool) async {
+        var outcome: CancelOutcome
+        let byClient = serverId == nil
+        do {
+            if let serverId {
+                try await queueService.cancelQueued(sessionId, itemId: serverId)
+            } else if let clientMessageId {
+                try await queueService.cancelQueuedByClient(sessionId, clientMessageId: clientMessageId)
+            }
+            outcome = .cancelled
+        } catch {
+            outcome = ChatViewModel.cancelOutcome(for: error)
+        }
+        // Pre-§15 server (no by-client route): the acknowledged queue id.
+        if byClient, case .notFound = outcome, let fallbackServerId {
+            do {
+                try await queueService.cancelQueued(sessionId, itemId: fallbackServerId)
+                outcome = .cancelled
+            } catch {
+                outcome = ChatViewModel.cancelOutcome(for: error)
+            }
+        }
+        await settleCancel(key: key, outcome: outcome, byClient: byClient, wasQueued: wasQueued)
+    }
+
+    private func settleCancel(key: String, outcome: CancelOutcome, byClient: Bool, wasQueued: Bool) async {
+        switch outcome {
+        case .cancelled:
+            guard var intent = cancelIntents[key] else { return }
+            intent.inFlight = false
+            intent.awaitingServerItem = false
+            intent.settledAt = Date()
+            cancelIntents[key] = intent
+            // Server truth now: gone. (A lagging queue_update stays hidden by
+            // the settled intent for a grace period.)
+            serverQueue.removeAll { item in
+                (intent.serverId != nil && item.id == intent.serverId)
+                    || (intent.clientMessageId != nil && item.clientMessageId == intent.clientMessageId)
+            }
+            scheduleCommit()
+        case .alreadyDelivered:
+            markAlreadyDelivered(key)
+        case .notFound where byClient:
+            // The server doesn't know this clientMessageId (yet): the POST
+            // never arrived, or is still being processed — if the item shows
+            // up in the queue, `sweepCancelIntents` cancels it then.
+            guard var intent = cancelIntents[key] else { return }
+            intent.inFlight = false
+            intent.awaitingServerItem = true
+            cancelIntents[key] = intent
+            scheduleCommit()
+            sweepCancelIntents()
+        case .notFound:
+            if wasQueued {
+                // The queued item is gone (dispatched or cancelled elsewhere):
+                // resync silently — a delivered one shows up as its echo.
+                dropCancelIntent(key)
+                await loadQueue()
+            } else {
+                // Pre-§15 server: a running item can't be cancelled.
+                markAlreadyDelivered(key)
+            }
+        case .failed(let error):
+            if byClient, ChatViewModel.isLostRequest(error) {
+                // Unreachable: keep watching for the item to cancel it.
+                guard var intent = cancelIntents[key] else { return }
+                intent.inFlight = false
+                intent.awaitingServerItem = true
+                cancelIntents[key] = intent
+                scheduleCommit()
+                sweepCancelIntents()
+                return
+            }
+            // 502 (pi's queue couldn't be cleared) etc.: roll back, show why.
+            dropCancelIntent(key)
+            surface(error)
+            await loadQueue()
+        }
+    }
+
+    /// 409 `already_delivered`: the chip comes back (no ✕) until the echo
+    /// turns it into the user row.
+    private func markAlreadyDelivered(_ key: String) {
+        dropCancelIntent(key)
+        uncancellable.insert(key)
+        scheduleCommit()
+        infoMessage = ChatViewModel.alreadyDeliveredInfo
+    }
+
+    private func dropCancelIntent(_ key: String) {
+        guard cancelIntents.removeValue(forKey: key) != nil else { return }
+        scheduleCommit()
+    }
+
+    /// A message cancelled before the server knew it showed up in the queue
+    /// after all: cancel it by its queue id now.
+    private func sweepCancelIntents() {
+        guard cancelIntents.values.contains(where: \.awaitingServerItem) else { return }
+        for item in serverQueue {
+            guard let cid = item.clientMessageId else { continue }
+            let key = ChatViewModel.cancelKey(clientMessageId: cid, serverId: nil)
+            guard var intent = cancelIntents[key], intent.awaitingServerItem else { continue }
+            intent.awaitingServerItem = false
+            intent.inFlight = true
+            intent.serverId = item.id
+            cancelIntents[key] = intent
+            let wasQueued = item.status == "queued"
+            spawn { [weak self] in
+                await self?.runCancel(key: key, serverId: item.id, clientMessageId: nil,
+                                      fallbackServerId: nil, wasQueued: wasQueued)
+            }
+        }
+    }
+
+    /// A chip the user cancelled stays hidden while its intent lives; while a
+    /// DELETE is in flight a pi-native copy of its text is hidden too (pi's
+    /// own queue still lists it until the server clears it).
+    private func isHiddenByCancel(_ chip: QueueChip) -> Bool {
+        guard !cancelIntents.isEmpty else { return false }
+        if chip.origin == .piNative {
+            let norm = TextNormalizer.normalize(chip.item.message)
+            return cancelIntents.values.contains {
+                $0.inFlight && !$0.text.isEmpty && TextNormalizer.normalize($0.text) == norm
+            }
+        }
+        if let cid = chip.item.clientMessageId, cancelIntents[cid] != nil { return true }
+        let id = chip.serverId ?? chip.item.id
+        return cancelIntents["id:" + id] != nil || cancelIntents.values.contains { $0.serverId == id }
+    }
+
+    /// Forget settled intents once the server dropped the item (after a short
+    /// grace for lagging queue updates), and stale "already delivered" marks.
+    private func pruneCancels() {
+        guard !cancelIntents.isEmpty || !uncancellable.isEmpty else { return }
+        let now = Date()
+        let liveCids = Set(serverQueue.compactMap(\.clientMessageId)).union(localPending.compactMap(\.clientMessageId))
+        let liveIds = Set(serverQueue.map(\.id)).union(localPending.map(\.id))
+        func present(_ key: String) -> Bool {
+            key.hasPrefix("id:") ? liveIds.contains(String(key.dropFirst(3))) : liveCids.contains(key)
+        }
+        let kept = cancelIntents.filter { key, intent in
+            if intent.inFlight { return true }
+            if intent.awaitingServerItem { return now.timeIntervalSince(intent.since) < Self.cancelWatch }
+            let age = now.timeIntervalSince(intent.settledAt ?? intent.since)
+            return age < Self.cancelGrace || (present(key) && age < Self.cancelWatch)
+        }
+        if kept.count != cancelIntents.count { cancelIntents = kept }
+        let blocked = uncancellable.filter(present)
+        if blocked.count != uncancellable.count { uncancellable = blocked }
+    }
+
+    /// A confirmed cancel hides lagging queue updates this long.
+    private static let cancelGrace: TimeInterval = 10
+    /// Upper bound for watching a cancelled item (unknown to the server, or
+    /// still listed after a confirmed cancel).
+    private static let cancelWatch: TimeInterval = 60
 
     /// Contract §10 "send now": promote a queued item into the running turn.
     /// Optimistic — the chip flips to running/"sending" at once via the
@@ -893,13 +1248,16 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    /// Items with a send-now in flight / just accepted render as running.
+    /// Items with a send-now in flight render as "sending…"; once accepted
+    /// as a running steer (pi takes it after the current step).
     private func steered(_ items: [QueueItem]) -> [QueueItem] {
         guard !steering.isEmpty else { return items }
         return items.map { item in
-            guard item.status == "queued", steering[item.id] != nil else { return item }
+            guard item.status == "queued", let since = steering[item.id] else { return item }
+            let inFlight = since == .distantFuture
             return QueueItem(id: item.id, clientMessageId: item.clientMessageId, message: item.message,
-                             status: "running", queuedAt: item.queuedAt)
+                             status: inFlight ? "sending" : "running", queuedAt: item.queuedAt,
+                             steered: inFlight ? item.steered : true)
         }
     }
 
@@ -927,9 +1285,10 @@ final class ChatViewModel: ObservableObject {
 
     /// Server truth from /queue (durable outbox).
     func loadQueue() async {
-        if let items = try? await client.fetchQueue(sessionId), lifecycleActive {
+        if let items = try? await queueService.fetchQueue(sessionId), lifecycleActive {
             let active = items.filter(\.isActive)
             if active != serverQueue { serverQueue = active }
+            sweepCancelIntents()
         }
         await refreshStats()
     }
@@ -1054,8 +1413,8 @@ final class ChatViewModel: ObservableObject {
         defer { flushingOffline = false }
         while lifecycleActive, let item = offlinePending.first {
             do {
-                let resp = try await client.sendTurn(sessionId, message: item.text,
-                                                     clientMessageId: item.clientMessageId)
+                let resp = try await queueService.sendTurn(sessionId, message: item.text, force: false,
+                                                           clientMessageId: item.clientMessageId)
                 offlinePending.removeAll { $0.id == item.id }
                 let delivered = resp.dispatched == true || !resp.queued
                 localPending.append(QueueItem(id: resp.queueItemId ?? "pending:\(item.clientMessageId)",
@@ -1620,6 +1979,7 @@ final class ChatViewModel: ObservableObject {
         } else if let items = obj["items"] as? [[String: Any]] {
             let parsed = items.compactMap(QueueItem.init(json:)).filter(\.isActive)
             if parsed != serverQueue { serverQueue = parsed }
+            sweepCancelIntents()
         }
     }
 

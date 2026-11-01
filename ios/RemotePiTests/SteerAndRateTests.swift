@@ -70,20 +70,23 @@ final class SteerAndRateTests: XCTestCase {
         XCTAssertTrue(actions.steerable)
     }
 
-    func testRunningChipIsNeither() {
-        // After a steer the chip flips queued → running in place: no longer
-        // cancellable/steerable, and (below) still the same row — no duplicate.
+    func testRunningChipIsCancellableButNotSteerable() {
+        // After a steer the chip flips queued → running in place: pi holds it
+        // until the current step ends, so it can still be cancelled (§15) but
+        // not sent-now again; (below) still the same row — no duplicate.
         let c = chip(queue("srv-1", "deploy", status: "running", cid: "c1"), serverId: "srv-1", origin: .server)
         let actions = ChatViewModel.chipActions(c)
-        XCTAssertFalse(actions.cancellable)
+        XCTAssertTrue(actions.cancellable)
         XCTAssertFalse(actions.steerable)
     }
 
-    func testLocalSendingChipWithoutServerIdIsNeither() {
+    func testLocalSendingChipWithoutServerIdIsCancellableNotSteerable() {
+        // POST not acknowledged yet: ✕ cancels by clientMessageId.
         let c = chip(queue("pending:c1", "hi", status: "sending", cid: "c1"), serverId: nil, origin: .local)
         let actions = ChatViewModel.chipActions(c)
-        XCTAssertFalse(actions.cancellable)
+        XCTAssertTrue(actions.cancellable)
         XCTAssertFalse(actions.steerable)
+        XCTAssertEqual(ChatViewModel.chipActionId(c), "pending:c1")
     }
 
     func testPiNativeChipIsNeither() {
@@ -198,13 +201,14 @@ final class LiveRateAndSteerStateTests: XCTestCase {
         XCTAssertEqual(after.id, before.id, "same row — no duplicate, no recreation")
         XCTAssertEqual(vm.transcript.value.filter { $0.kind == .queued }.count, 1)
         XCTAssertFalse(after.canSteer, "no second send-now while one is in flight")
-        XCTAssertEqual(after.statusText, "sending")
+        XCTAssertTrue(after.cancellable, "a send-now in flight can still be cancelled")
+        XCTAssertEqual(after.statusText, "sending…")
 
         // A lagging queue_update still saying `queued` must not flip it back.
         vm.ingestForTesting([queueFrame(status: "queued")])
         vm.commitNow()
         let lagged = try XCTUnwrap(vm.transcript.value.first { $0.kind == .queued })
-        XCTAssertEqual(lagged.statusText, "sending")
+        XCTAssertEqual(lagged.statusText, "sending…")
         XCTAssertFalse(lagged.canSteer)
         vm.stop()
     }

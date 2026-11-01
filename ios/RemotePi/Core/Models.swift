@@ -258,9 +258,14 @@ struct QueueItem: Decodable, Identifiable, Equatable {
     let startedAt: Int?
     let completedAt: Int?
     let error: String?
+    /// Contract §15: true once the item was delivered to pi as a steer (pi
+    /// holds it until the current step ends), until it settles. nil on
+    /// servers that don't send it.
+    let steered: Bool?
 
     init(id: String, clientMessageId: String?, message: String, status: String,
-         queuedAt: Int?, startedAt: Int? = nil, completedAt: Int? = nil, error: String? = nil) {
+         queuedAt: Int?, startedAt: Int? = nil, completedAt: Int? = nil, error: String? = nil,
+         steered: Bool? = nil) {
         self.id = id
         self.clientMessageId = clientMessageId
         self.message = message
@@ -269,10 +274,11 @@ struct QueueItem: Decodable, Identifiable, Equatable {
         self.startedAt = startedAt
         self.completedAt = completedAt
         self.error = error
+        self.steered = steered
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, clientMessageId, message, text, status, queuedAt, startedAt, completedAt, error
+        case id, clientMessageId, message, text, status, queuedAt, startedAt, completedAt, error, steered
     }
 
     init(from decoder: Decoder) throws {
@@ -287,6 +293,7 @@ struct QueueItem: Decodable, Identifiable, Equatable {
         startedAt = Self.flexibleInt(c, .startedAt)
         completedAt = Self.flexibleInt(c, .completedAt)
         error = try? c.decodeIfPresent(String.self, forKey: .error)
+        steered = try? c.decodeIfPresent(Bool.self, forKey: .steered)
     }
 
     private static func flexibleInt(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) -> Int? {
@@ -311,7 +318,8 @@ struct QueueItem: Decodable, Identifiable, Equatable {
                   queuedAt: (d["queuedAt"] as? NSNumber).map { Int($0.int64Value) },
                   startedAt: (d["startedAt"] as? NSNumber).map { Int($0.int64Value) },
                   completedAt: (d["completedAt"] as? NSNumber).map { Int($0.int64Value) },
-                  error: d["error"] as? String)
+                  error: d["error"] as? String,
+                  steered: d["steered"] as? Bool)
     }
 }
 
