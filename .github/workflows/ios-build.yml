@@ -102,7 +102,8 @@ jobs:
             -destination "platform=iOS Simulator,id=$UDID" \
             -only-testing:RemotePiTests/ExpandCrashReproTests \
             -only-testing:RemotePiTests/EventSourceStreamTests \
-            -only-testing:RemotePiTests/CancelPendingTests \
+            -only-testing:RemotePiTests/ChipLabelAndActionTests \
+            -only-testing:RemotePiTests/CancelPendingFlowTests \
             -only-testing:RemotePiTests/TranscriptReplayTests \
             -only-testing:RemotePiTests/QuestionSnapshotTests \
             -only-testing:RemotePiTests/ModelPickerSnapshotTests \
