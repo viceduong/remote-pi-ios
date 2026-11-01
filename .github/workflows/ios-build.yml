@@ -66,12 +66,18 @@ jobs:
 
   expand-ios15:
     name: Expand repro (iOS 15 simulator)
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
       - uses: actions/checkout@v4
       - name: Install XcodeGen
         run: brew install xcodegen
+      - name: Select Xcode
+        run: |
+          # macOS 14 images are retired (2026-11-02); prefer Xcode 15.4 for the
+          # iOS 15 runtime when the image still ships it, else the default.
+          if [ -d /Applications/Xcode_15.4.app ]; then sudo xcode-select -s /Applications/Xcode_15.4.app; fi
+          ls -d /Applications/Xcode_*.app
       - name: Install iOS 15 simulator runtime
         run: |
           xcodebuild -version
@@ -84,8 +90,10 @@ jobs:
         run: |
           cd ios
           xcodegen generate --spec project.yml
-          # Xcode 15.4 cannot open the Xcode 16 project format (objectVersion 77).
-          sed -i '' -E 's/objectVersion = [0-9]+;/objectVersion = 56;/' AiChing.xcodeproj/project.pbxproj
+          # Xcode 15.x cannot open the Xcode 16 project format (objectVersion 77).
+          if xcodebuild -version | grep -q "Xcode 15"; then
+            sed -i '' -E 's/objectVersion = [0-9]+;/objectVersion = 56;/' AiChing.xcodeproj/project.pbxproj
+          fi
           RT=$(xcrun simctl list runtimes | grep -oE 'com\.apple\.CoreSimulator\.SimRuntime\.iOS-15-[0-9]+' | tail -1)
           echo "runtime: $RT"
           test -n "$RT"
@@ -94,6 +102,8 @@ jobs:
             -destination "platform=iOS Simulator,id=$UDID" \
             -only-testing:RemotePiTests/ExpandCrashReproTests \
             -only-testing:RemotePiTests/EventSourceStreamTests \
+            -only-testing:RemotePiTests/CancelPendingTests \
+            -only-testing:RemotePiTests/TranscriptReplayTests \
             -only-testing:RemotePiTests/QuestionSnapshotTests \
             -only-testing:RemotePiTests/ModelPickerSnapshotTests \
             -only-testing:RemotePiTests/NewSessionSnapshotTests \
