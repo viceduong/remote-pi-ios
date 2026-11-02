@@ -278,9 +278,11 @@ enum ShellOutputText {
     /// carriage-return progress lines (`\r` redraws), keep only the last
     /// redraw of each line.
     static func normalize(_ raw: String) -> String {
-        guard raw.contains("\r") else { return raw }
+        // Check scalars, not Characters: Swift treats "\r\n" as ONE grapheme,
+        // so `String.contains("\r")` is false for CRLF text.
+        guard raw.unicodeScalars.contains("\r") else { return raw }
         let unified = raw.replacingOccurrences(of: "\r\n", with: "\n")
-        guard unified.contains("\r") else { return unified }
+        guard unified.unicodeScalars.contains("\r") else { return unified }
         return unified.components(separatedBy: "\n").map { line -> String in
             guard line.contains("\r") else { return line }
             let pieces = line.components(separatedBy: "\r")
