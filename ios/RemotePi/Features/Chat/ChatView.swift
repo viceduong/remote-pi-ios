@@ -22,6 +22,11 @@ struct ChatView: View {
 
     @StateObject private var viewModel: ChatViewModel
     @State private var selectedText: SelectableText?
+    /// Contract §16 background shells. Held WITHOUT observation (badge,
+    /// button and sheet observe it themselves), so its 10 s poll never
+    /// re-renders the chat screen.
+    @State private var shells: BackgroundShellsModel
+    @State private var showShells = false
 
     init(server: ServerConfig, session: SessionSummary) {
         self.server = server
@@ -31,6 +36,7 @@ struct ChatView: View {
         self.client = client
         _viewModel = StateObject(wrappedValue: ChatViewModel(client: client, sessionId: session.id,
                                                              initialModel: session.model))
+        _shells = State(initialValue: BackgroundShellsModel(service: client, sessionId: session.id))
     }
 
     var body: some View {
@@ -43,12 +49,15 @@ struct ChatView: View {
                                contentSize: dynamicTypeSize.uiContentSizeCategory,
                                actions: transcriptActions)
                 .overlay { loadingOverlay }
+                .sheet(isPresented: $showShells) {
+                    BackgroundShellsSheet(model: shells, theme: theme)
+                }
         }
         // Composer + status bars live in the bottom safe-area inset: they stay
         // docked above the keyboard and the transcript ends exactly at their
         // top edge (no reserved blank slots → no gaps).
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            ChatBottomBar(viewModel: viewModel, status: viewModel.status)
+            ChatBottomBar(viewModel: viewModel, status: viewModel.status, shells: shells)
         }
         .background(theme.background)
         .navigationTitle(session.name)
@@ -59,23 +68,10 @@ struct ChatView: View {
             }
             ToolbarItem(placement: .navigationBarTrailing) {
                 HStack(spacing: 12) {
-                    Menu {
-                        Button {
-                            viewModel.requestFork(entryId: nil, name: "fork of \(session.name)")
-                        } label: {
-                            Label("Fork at latest message", systemImage: "arrow.branch")
-                        }
-                        if let workdir = session.workdir, !workdir.isEmpty {
-                            Button {
-                                UIPasteboard.general.string = workdir
-                            } label: {
-                                Label("Copy folder path", systemImage: "doc.on.doc")
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                    }
-                    .accessibilityLabel("More actions")
+                    ChatActionsMenu(shells: shells,
+                                    workdir: session.workdir,
+                                    onFork: { viewModel.requestFork(entryId: nil, name: "fork of \(session.name)") },
+                                    onShowShells: { showShells = true })
                     ToolbarStatusControl(status: viewModel.status,
                                          connected: viewModel.connectionState == .connected,
                                          onAbort: { viewModel.abort() })
@@ -83,6 +79,8 @@ struct ChatView: View {
             }
         }
         .task { await viewModel.start() }
+        // §16 shells poll (10 s) + activity watch; idempotent per appear.
+        .onAppear { shells.start(observing: viewModel.status) }
         .onChange(of: scenePhase) { phase in
             // Only a real background transition suspends the network:
             // `.inactive` (control centre, app switcher peek, alerts) must not
@@ -90,8 +88,10 @@ struct ChatView: View {
             switch phase {
             case .background:
                 viewModel.suspendNetwork()
+                shells.stop()
             case .active:
                 viewModel.resumeNetwork()
+                shells.start(observing: viewModel.status)
             default:
                 break
             }
@@ -99,7 +99,10 @@ struct ChatView: View {
         .onChange(of: viewModel.shouldDismiss) { dismiss in
             if dismiss { presentationMode.wrappedValue.dismiss() }
         }
-        .onDisappear { viewModel.stop() }
+        .onDisappear {
+            viewModel.stop()
+            shells.teardown()
+        }
         .alert(alertTitle, isPresented: alertBinding) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -202,12 +205,29 @@ struct ChatTranscriptArea: View {
 struct ChatBottomBar: View {
     @ObservedObject var viewModel: ChatViewModel
     @ObservedObject var status: ChatLiveStatus
+    /// Contract §16 (nil = no Background button / notices).
+    let shells: BackgroundShellsModel?
     @Environment(\.theme) private var theme
+
+    init(viewModel: ChatViewModel, status: ChatLiveStatus, shells: BackgroundShellsModel? = nil) {
+        _viewModel = ObservedObject(wrappedValue: viewModel)
+        _status = ObservedObject(wrappedValue: status)
+        self.shells = shells
+    }
+
+    /// The Background (Ctrl+B) button shows only while the agent runs bash.
+    private var backgroundModel: BackgroundShellsModel? {
+        BackgroundBashRule.isVisible(kind: status.activityKind, tool: status.activityTool) ? shells : nil
+    }
 
     var body: some View {
         VStack(spacing: 0) {
+            if let shells {
+                BackgroundNoticeBanner(model: shells)
+            }
             if let work = status.workingText {
-                WorkingBanner(text: work, kind: status.activityKind, since: status.activitySince)
+                WorkingBanner(text: work, kind: status.activityKind, since: status.activitySince,
+                              background: backgroundModel)
             }
             ChatStatsStrip(viewModel: viewModel, status: status)
             ComposerView { text in viewModel.send(text) }
@@ -377,7 +397,16 @@ struct WorkingBanner: View {
     let text: String
     let kind: AgentActivity.Kind?
     let since: Date?
+    /// Contract §16: shows the "Background" (Ctrl+B) button when set.
+    let background: BackgroundShellsModel?
     @Environment(\.theme) private var theme
+
+    init(text: String, kind: AgentActivity.Kind?, since: Date?, background: BackgroundShellsModel? = nil) {
+        self.text = text
+        self.kind = kind
+        self.since = since
+        self.background = background
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -401,11 +430,14 @@ struct WorkingBanner: View {
                 ElapsedLabel(since: since)
             }
             Spacer(minLength: 0)
+            if let background {
+                BackgroundBashButton(model: background)
+            }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.vertical, background == nil ? 6 : 4)
         .background(theme.accent.opacity(0.10))
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: background == nil ? .combine : .contain)
     }
 
     /// Spinner for plain "working"/optimistic states, a symbol otherwise.

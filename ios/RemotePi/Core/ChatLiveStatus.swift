@@ -80,6 +80,9 @@ final class ChatLiveStatus: ObservableObject {
     @Published private(set) var hostOwned = false
     /// Kind of the displayed activity (banner icon); nil = spinner only.
     @Published private(set) var activityKind: AgentActivity.Kind?
+    /// Tool name of the displayed `toolcall`/`tool` activity (contract §7),
+    /// e.g. "bash" — drives the §16 "Background" button.
+    @Published private(set) var activityTool: String?
     /// Local time the displayed activity started (elapsed counter origin).
     /// Changes only on kind/tool transitions — not every second.
     @Published private(set) var activitySince: Date?
@@ -171,6 +174,8 @@ final class ChatLiveStatus: ObservableObject {
         if hostOwned != owned { hostOwned = owned }
         let kind = state.displayActivity?.kind
         if activityKind != kind { activityKind = kind }
+        let tool = state.displayActivity?.tool
+        if activityTool != tool { activityTool = tool }
         if activitySince != state.activitySince { activitySince = state.activitySince }
     }
 }

@@ -445,7 +445,108 @@ struct APIClient {
         }
         throw APIError.decoding("unexpected test response")
     }
+
+    // MARK: - Contract §16 background bash / shells
+
+    /// Path-segment encoding for ids (server validates `^bg-[0-9a-f]{8}$`).
+    private static func pathSegment(_ raw: String) throws -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/?#;")
+        guard let encoded = raw.addingPercentEncoding(withAllowedCharacters: allowed), !encoded.isEmpty else {
+            throw APIError.invalidURL
+        }
+        return encoded
+    }
+
+    /// `POST /api/sessions/:id/background` (Ctrl+B). 409 / 502 / 404 are
+    /// expected outcomes, not errors; anything else throws `APIError.http`.
+    func backgroundBash(_ sessionId: String) async throws -> BackgroundBashOutcome {
+        let (data, status) = try await sendRaw(makeRequest("/api/sessions/\(sessionId)/background",
+                                                           method: "POST"))
+        return try Self.backgroundOutcome(status: status, data: data)
+    }
+
+    /// Maps a `/background` response (pure; unit-tested).
+    static func backgroundOutcome(status: Int, data: Data) throws -> BackgroundBashOutcome {
+        switch status {
+        case 200...299:
+            let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+            if body["unsupported"] as? Bool == true {
+                return .failed((body["error"] as? String) ?? "Backgrounding isn't available — reload the TUI")
+            }
+            if body["ok"] as? Bool == false {
+                return .failed((body["error"] as? String) ?? "Couldn't move to background")
+            }
+            if let detached = body["detached"] as? Bool {
+                return detached ? .detached : .notDetached
+            }
+            return .requested   // null / absent: RPC child, result unknown
+        case 409:
+            return .nothingRunning
+        case 404:
+            return .unsupportedServer
+        case 502:
+            if case .http(_, let message, _) = httpError(status: status, data: data),
+               message != HTTPURLResponse.localizedString(forStatusCode: status) {
+                return .failed(message)
+            }
+            return .failed("Couldn't move to background — reload the TUI")
+        default:
+            throw httpError(status: status, data: data)
+        }
+    }
+
+    /// `GET /api/sessions/:id/shells` (404 on pre-§16 servers →
+    /// `APIError.http(404, …)`).
+    func listShells(_ sessionId: String) async throws -> [BackgroundShell] {
+        let data = try await send(makeRequest("/api/sessions/\(sessionId)/shells"))
+        return try Self.decodeShellList(data)
+    }
+
+    /// `{shells:[…]}` (or a bare array); malformed entries are dropped.
+    static func decodeShellList(_ data: Data) throws -> [BackgroundShell] {
+        struct Wrapper: Decodable { let shells: [Lenient<BackgroundShell>]? }
+        guard !data.isEmpty else { throw APIError.decoding("empty response (server restarted?)") }
+        let decoder = JSONDecoder()
+        if let wrapper = try? decoder.decode(Wrapper.self, from: data) {
+            return (wrapper.shells ?? []).compactMap { $0.value }
+        }
+        if let list = try? decoder.decode([Lenient<BackgroundShell>].self, from: data) {
+            return list.compactMap { $0.value }
+        }
+        let preview = String(data: data.prefix(160), encoding: .utf8) ?? "<binary>"
+        throw APIError.decoding("malformed shell list — got: \(preview)")
+    }
+
+    /// `GET /api/sessions/:id/shells/:shellId/output?tail=<bytes>`.
+    func shellOutput(_ sessionId: String, shellId: String, tail: Int = 16_384) async throws -> ShellOutput {
+        let bytes = min(max(tail, 1), 262_144)
+        let segment = try Self.pathSegment(shellId)
+        let path = "/api/sessions/\(sessionId)/shells/\(segment)/output?tail=\(bytes)"
+        let data = try await send(makeRequest(path))
+        return try Self.decodeShellOutput(data)
+    }
+
+    static func decodeShellOutput(_ data: Data) throws -> ShellOutput {
+        guard !data.isEmpty else { throw APIError.decoding("empty response (server restarted?)") }
+        do {
+            return try JSONDecoder().decode(ShellOutput.self, from: data)
+        } catch {
+            let preview = String(data: data.prefix(160), encoding: .utf8) ?? "<binary>"
+            throw APIError.decoding("malformed shell output — got: \(preview)")
+        }
+    }
+
+    /// `POST /api/sessions/:id/shells/:shellId/kill` → `{ok:true}`.
+    func killShell(_ sessionId: String, shellId: String) async throws {
+        let segment = try Self.pathSegment(shellId)
+        let path = "/api/sessions/\(sessionId)/shells/\(segment)/kill"
+        try await postNoResponse(path)
+    }
 }
+
+/// Contract §16 endpoints used by the background-shells UI.
+extension APIClient: BackgroundShellService {}
 
 /// Contract §14 endpoints used by the Notifications settings screen.
 extension APIClient: NotifyService {}
