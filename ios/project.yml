@@ -24,8 +24,11 @@ targets:
       path: RemotePi/Info.plist
       properties:
         CFBundleDisplayName: Remote Pi
-        CFBundleShortVersionString: "5.20"
-        CFBundleVersion: "60"
+        CFBundleShortVersionString: "5.21"
+        CFBundleVersion: "61"
+        # §17: attach images to a prompt (camera / photo library / files).
+        NSCameraUsageDescription: Take a photo to attach to a message you send to your pi agent.
+        NSPhotoLibraryUsageDescription: Attach photos from your library to messages you send to your pi agent.
         # Contract §14: Bark turn-end pushes open remotepi://session/<id>.
         CFBundleURLTypes:
           - CFBundleURLName: com.aiching.remotepi

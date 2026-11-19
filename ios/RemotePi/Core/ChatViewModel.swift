@@ -780,20 +780,24 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Actions
 
-    func send(_ text: String) {
+    func send(_ text: String, images: [ImageAttachment] = []) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        // Allow an image-only prompt (no text); give it a default caption so the
+        // server's non-empty message rule is satisfied.
+        guard !trimmed.isEmpty || !images.isEmpty else { return }
+        let message = trimmed.isEmpty ? "(image)" : trimmed
+        let payloads = images.map(\.payload)
         let clientMessageId = UUID().uuidString
         // UX: the prompt shows as a chip immediately and turns into a real
         // bubble when the server echoes the user row (clientMessageId first).
         localPending.append(QueueItem(id: "pending:\(clientMessageId)", clientMessageId: clientMessageId,
-                                      message: trimmed, status: "sending", queuedAt: ChatViewModel.nowMs))
+                                      message: message, status: "sending", queuedAt: ChatViewModel.nowMs))
         status.apply(.optimisticSend)
         scrollToBottomRequests.send(())
         // Runs after this synchronous call returns (main-actor task), so the
         // entry below is always registered before the task can clear it.
         deliverTasks[clientMessageId] = spawn { [weak self] in
-            await self?.deliver(trimmed, clientMessageId: clientMessageId, force: false)
+            await self?.deliver(message, clientMessageId: clientMessageId, force: false, images: payloads)
             self?.deliverTasks[clientMessageId] = nil
         }
     }
@@ -803,10 +807,12 @@ final class ChatViewModel: ObservableObject {
         localPending[i] = transform(localPending[i])
     }
 
-    private func deliver(_ text: String, clientMessageId: String, force: Bool) async {
+    private func deliver(_ text: String, clientMessageId: String, force: Bool,
+                         images: [PromptImage] = []) async {
         do {
             let resp = try await queueService.sendTurn(sessionId, message: text, force: force,
-                                                       clientMessageId: clientMessageId)
+                                                       clientMessageId: clientMessageId,
+                                                       images: images.isEmpty ? nil : images)
             let delivered = resp.dispatched == true || !resp.queued
             if let needsServerCancel = cancelledLocal.removeValue(forKey: clientMessageId) {
                 // ✕ was tapped before this (late) ack: the server has the
@@ -853,7 +859,7 @@ final class ChatViewModel: ObservableObject {
                 localPending.append(QueueItem(id: "pending:\(clientMessageId)", clientMessageId: clientMessageId,
                                               message: text, status: "sending", queuedAt: ChatViewModel.nowMs))
                 status.apply(.optimisticSend)
-                await deliver(text, clientMessageId: clientMessageId, force: true)
+                await deliver(text, clientMessageId: clientMessageId, force: true, images: images)
                 return
             }
             if case APIError.http(409, _, "session_live") = error {

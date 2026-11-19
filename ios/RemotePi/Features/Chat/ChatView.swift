@@ -230,7 +230,7 @@ struct ChatBottomBar: View {
                               background: backgroundModel)
             }
             ChatStatsStrip(viewModel: viewModel, status: status)
-            ComposerView { text in viewModel.send(text) }
+            ComposerView { text, images in viewModel.send(text, images: images) }
         }
     }
 }
@@ -716,23 +716,47 @@ struct QuestionPreviewBlock: View {
 
 /// Composer: the draft lives in LOCAL state, so typing re-renders only this
 /// view (never the chat screen or the transcript).
+private enum ComposerPicker: Identifiable {
+    case camera, library, files
+    var id: Int { hashValue }
+}
+
 struct ComposerView: View {
-    let onSend: (String) -> Void
+    let onSend: (String, [ImageAttachment]) -> Void
     @State private var text = ""
+    @State private var attachments: [ImageAttachment] = []
+    @State private var activePicker: ComposerPicker?
     @Environment(\.theme) private var theme
 
-    init(onSend: @escaping (String) -> Void) {
+    init(onSend: @escaping (String, [ImageAttachment]) -> Void) {
         self.onSend = onSend
     }
 
     private var canSend: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+    }
+
+    private var cameraAvailable: Bool {
+        UIImagePickerController.isSourceTypeAvailable(.camera)
+    }
+
+    private func submit() {
+        let draft = text
+        let imgs = attachments
+        text = ""
+        attachments = []
+        onSend(draft, imgs)
     }
 
     var body: some View {
         VStack(spacing: 0) {
             Divider()
+            if !attachments.isEmpty {
+                attachmentStrip
+            }
             HStack(alignment: .bottom, spacing: 10) {
+                attachMenu
+
                 TextField("Message…", text: $text)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
@@ -741,9 +765,7 @@ struct ComposerView: View {
                     .accessibilityLabel("Message")
 
                 Button {
-                    let draft = text
-                    text = ""
-                    onSend(draft)
+                    submit()
                 } label: {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.system(size: 30))
@@ -755,6 +777,61 @@ struct ComposerView: View {
             .padding(.vertical, 8)
         }
         .background(theme.secondaryBackground)
+        .sheet(item: $activePicker) { picker in
+            switch picker {
+            case .camera:
+                SystemImagePicker(sourceType: .camera) { attachments.append($0) }
+                    .ignoresSafeArea()
+            case .library:
+                SystemImagePicker(sourceType: .photoLibrary) { attachments.append($0) }
+                    .ignoresSafeArea()
+            case .files:
+                ImageDocumentPicker { attachments.append(contentsOf: $0) }
+                    .ignoresSafeArea()
+            }
+        }
+    }
+
+    private var attachMenu: some View {
+        Menu {
+            if cameraAvailable {
+                Button { activePicker = .camera } label: { Label("Camera", systemImage: "camera") }
+            }
+            Button { activePicker = .library } label: { Label("Photo Library", systemImage: "photo") }
+            Button { activePicker = .files } label: { Label("Files", systemImage: "folder") }
+        } label: {
+            Image(systemName: "plus.circle.fill")
+                .font(.system(size: 30))
+                .foregroundColor(theme.accent)
+        }
+        .accessibilityLabel("Add attachment")
+    }
+
+    private var attachmentStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(attachments) { att in
+                    ZStack(alignment: .topTrailing) {
+                        Image(uiImage: att.image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 64, height: 64)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        Button {
+                            attachments.removeAll { $0.id == att.id }
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 18))
+                                .foregroundStyle(.white, .black.opacity(0.6))
+                        }
+                        .offset(x: 5, y: -5)
+                        .accessibilityLabel("Remove image")
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+        }
     }
 }
 

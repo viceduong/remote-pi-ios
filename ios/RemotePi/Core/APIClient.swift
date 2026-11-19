@@ -286,10 +286,11 @@ struct APIClient {
     }
 
     func sendTurn(_ id: String, message: String, force: Bool = false,
-                  clientMessageId: String? = nil) async throws -> TurnResponse {
+                  clientMessageId: String? = nil, images: [PromptImage]? = nil) async throws -> TurnResponse {
         let suffix = force ? "?force=1" : ""
+        let imgs = (images?.isEmpty ?? true) ? nil : images
         return try await post("/api/sessions/\(id)/turn\(suffix)",
-                              body: TurnRequest(message: message, clientMessageId: clientMessageId))
+                              body: TurnRequest(message: message, clientMessageId: clientMessageId, images: imgs))
     }
 
     /// Contract §11: `GET /api/sessions/:id/models` → `{models, current}`.

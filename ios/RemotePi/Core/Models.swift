@@ -527,9 +527,16 @@ struct AnyJSON: Decodable {
 }
 
 /// POST /api/sessions/:id/turn
+/// §17: a base64 image attached to a prompt (raw base64, no data: prefix).
+struct PromptImage: Encodable, Equatable {
+    let data: String
+    let mimeType: String
+}
+
 struct TurnRequest: Encodable {
     let message: String
     let clientMessageId: String?
+    let images: [PromptImage]?
 }
 
 struct TurnResponse: Decodable {
