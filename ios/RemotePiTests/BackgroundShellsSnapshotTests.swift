@@ -124,7 +124,7 @@ final class BackgroundShellsSnapshotTests: XCTestCase {
             let (model, _) = seededModel()
             let view = HStack(spacing: 12) {
                 ChatActionsMenu(shells: model, workdir: "/Users/pi/projects/remote-pi",
-                                onFork: {}, onShowShells: {})
+                                onRewind: {}, onShowShells: {})
             }
             .font(.title3)
             .foregroundColor(theme.accent)

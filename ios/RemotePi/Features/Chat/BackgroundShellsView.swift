@@ -115,16 +115,16 @@ struct BackgroundNoticeBanner: View {
 struct ChatActionsMenu: View {
     @ObservedObject var shells: BackgroundShellsModel
     let workdir: String?
-    let onFork: @MainActor () -> Void
+    let onRewind: @MainActor () -> Void
     let onShowShells: @MainActor () -> Void
 
     var body: some View {
         let running = shells.showsMenuEntry ? shells.runningCount : 0
         Menu {
             Button {
-                onFork()
+                onRewind()
             } label: {
-                Label("Fork at latest message", systemImage: "arrow.branch")
+                Label("Rewind to latest message", systemImage: "arrow.uturn.backward")
             }
             if let workdir, !workdir.isEmpty {
                 Button {

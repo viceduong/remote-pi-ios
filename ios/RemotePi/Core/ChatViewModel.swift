@@ -54,8 +54,9 @@ final class ChatViewModel: ObservableObject {
     /// is (not) near the bottom / the inline question row is (not) on screen.
     @Published var errorMessage: String?
     @Published var infoMessage: String?
+    /// §18: text to drop into the composer after a rewind (consumed once).
+    @Published var composerPrefill: String?
     /// Set after a successful fork — ChatView pops back to the session list.
-    @Published private(set) var shouldDismiss = false
 
     /// Contract §11 model picker listing state.
     enum ModelListState: Equatable {
@@ -894,14 +895,19 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    func requestFork(entryId: String?, name: String) {
+    /// §18: rewind in place. Stay in the session; the server starts a new
+    /// stream epoch so the transcript reloads at the rewind point, and the
+    /// rewound message text is dropped back into the composer to continue.
+    func requestRewind(entryId: String?) {
         spawn { [weak self] in
             guard let self else { return }
             do {
-                let (forked, text) = try await self.client.forkSession(self.sessionId, entryId: entryId, name: name)
-                self.infoMessage = "Forked → \(forked.name)" + (text.map { ": \(String($0.prefix(40)))" } ?? "")
-                try await Task.sleep(nanoseconds: 1_200_000_000)
-                self.shouldDismiss = true
+                let text = try await self.client.rewindSession(self.sessionId, entryId: entryId)
+                // Clear optimistic/pending state from the abandoned branch.
+                self.localPending.removeAll()
+                if let text, !text.isEmpty { self.composerPrefill = text }
+                await self.refreshFromServer()
+                self.infoMessage = "Rewound"
             } catch {
                 self.surface(error)
             }

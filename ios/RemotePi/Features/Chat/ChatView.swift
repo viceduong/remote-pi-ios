@@ -17,7 +17,6 @@ struct ChatView: View {
     @AppStorage("chatTextScale") private var textScale: Double = 1.0
     @Environment(\.theme) private var theme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    @Environment(\.presentationMode) private var presentationMode
     @Environment(\.scenePhase) private var scenePhase
 
     @StateObject private var viewModel: ChatViewModel
@@ -70,7 +69,7 @@ struct ChatView: View {
                 HStack(spacing: 12) {
                     ChatActionsMenu(shells: shells,
                                     workdir: session.workdir,
-                                    onFork: { viewModel.requestFork(entryId: nil, name: "fork of \(session.name)") },
+                                    onRewind: { viewModel.requestRewind(entryId: nil) },
                                     onShowShells: { showShells = true })
                     ToolbarStatusControl(status: viewModel.status,
                                          connected: viewModel.connectionState == .connected,
@@ -96,9 +95,6 @@ struct ChatView: View {
                 break
             }
         }
-        .onChange(of: viewModel.shouldDismiss) { dismiss in
-            if dismiss { presentationMode.wrappedValue.dismiss() }
-        }
         .onDisappear {
             viewModel.stop()
             shells.teardown()
@@ -116,7 +112,6 @@ struct ChatView: View {
 
     private var transcriptActions: TranscriptActions {
         let vm = viewModel
-        let forkName = "fork of \(session.name)"
         let selection = $selectedText
         return TranscriptActions(
             loadMore: { vm.loadMore() },
@@ -126,7 +121,7 @@ struct ChatView: View {
             discardOffline: { id in
                 if let uuid = UUID(uuidString: id) { vm.discardOffline(uuid) }
             },
-            fork: { entryId in vm.requestFork(entryId: entryId, name: forkName) },
+            rewind: { entryId in vm.requestRewind(entryId: entryId) },
             selectText: { text in selection.wrappedValue = SelectableText(text: text) }
         )
     }
@@ -230,7 +225,7 @@ struct ChatBottomBar: View {
                               background: backgroundModel)
             }
             ChatStatsStrip(viewModel: viewModel, status: status)
-            ComposerView { text, images in viewModel.send(text, images: images) }
+            ComposerView(prefill: $viewModel.composerPrefill) { text, images in viewModel.send(text, images: images) }
         }
     }
 }
@@ -723,12 +718,14 @@ private enum ComposerPicker: Identifiable {
 
 struct ComposerView: View {
     let onSend: (String, [ImageAttachment]) -> Void
+    @Binding var prefill: String?
     @State private var text = ""
     @State private var attachments: [ImageAttachment] = []
     @State private var activePicker: ComposerPicker?
     @Environment(\.theme) private var theme
 
-    init(onSend: @escaping (String, [ImageAttachment]) -> Void) {
+    init(prefill: Binding<String?>, onSend: @escaping (String, [ImageAttachment]) -> Void) {
+        self._prefill = prefill
         self.onSend = onSend
     }
 
@@ -777,6 +774,12 @@ struct ComposerView: View {
             .padding(.vertical, 8)
         }
         .background(theme.secondaryBackground)
+        .onChange(of: prefill) { newValue in
+            // §18: a rewind drops the rewound message back into the composer.
+            guard let newValue, !newValue.isEmpty else { return }
+            text = newValue
+            prefill = nil
+        }
         .sheet(item: $activePicker) { picker in
             switch picker {
             case .camera:

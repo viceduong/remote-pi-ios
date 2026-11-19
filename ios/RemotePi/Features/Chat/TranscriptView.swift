@@ -9,7 +9,7 @@ struct TranscriptActions {
     var cancelQueued: @MainActor (String) -> Void = { _ in }
     var steerQueued: @MainActor (String) -> Void = { _ in }
     var discardOffline: @MainActor (String) -> Void = { _ in }
-    var fork: @MainActor (String) -> Void = { _ in }
+    var rewind: @MainActor (String) -> Void = { _ in }
     var selectText: @MainActor (String) -> Void = { _ in }
     /// The inline question row (newest row) came on / went off screen.
 }
@@ -610,8 +610,8 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
             self?.actions.selectText(text)
         })
         if item.kind == .user, let entryId = item.entryId {
-            children.append(UIAction(title: "Fork from here", image: UIImage(systemName: "arrow.branch")) { [weak self] _ in
-                self?.actions.fork(entryId)
+            children.append(UIAction(title: "Rewind from here", image: UIImage(systemName: "arrow.uturn.backward")) { [weak self] _ in
+                self?.actions.rewind(entryId)
             })
         }
         if let body = rows[item.id]?.body {

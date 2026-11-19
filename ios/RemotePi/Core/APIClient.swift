@@ -402,18 +402,13 @@ struct APIClient {
     }
 
 
-    /// Fork the session at a user message (or latest when entryId is nil).
-    func forkSession(_ id: String, entryId: String? = nil, name: String? = nil) async throws -> (SessionSummary, String?) {
-        struct ForkRequest: Encodable {
-            let entryId: String?
-            let name: String?
-        }
-        struct Wrapper: Decodable {
-            let session: SessionSummary
-            let forkedFrom: String?
-        }
-        let wrapper: Wrapper = try await post("/api/sessions/\(id)/fork", body: ForkRequest(entryId: entryId, name: name))
-        return (wrapper.session, wrapper.forkedFrom)
+    /// §18: rewind the session to before a user message (or the latest when
+    /// entryId is nil) — same session, in place. Returns that message's text.
+    func rewindSession(_ id: String, entryId: String? = nil) async throws -> String? {
+        struct RewindRequest: Encodable { let entryId: String? }
+        struct Wrapper: Decodable { let ok: Bool; let text: String? }
+        let wrapper: Wrapper = try await post("/api/sessions/\(id)/rewind", body: RewindRequest(entryId: entryId))
+        return wrapper.text
     }
 
     func abortTurn(_ id: String) async throws {
