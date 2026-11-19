@@ -24,8 +24,8 @@ targets:
       path: RemotePi/Info.plist
       properties:
         CFBundleDisplayName: Remote Pi
-        CFBundleShortVersionString: "5.22"
-        CFBundleVersion: "62"
+        CFBundleShortVersionString: "5.23"
+        CFBundleVersion: "63"
         # §17: attach images to a prompt (camera / photo library / files).
         NSCameraUsageDescription: Take a photo to attach to a message you send to your pi agent.
         NSPhotoLibraryUsageDescription: Attach photos from your library to messages you send to your pi agent.

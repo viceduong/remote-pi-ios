@@ -751,12 +751,12 @@ struct ComposerView: View {
             if !attachments.isEmpty {
                 attachmentStrip
             }
-            HStack(alignment: .bottom, spacing: 10) {
+            HStack(alignment: .center, spacing: 10) {
                 attachMenu
 
                 TextField("Message…", text: $text)
                     .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
+                    .frame(height: 36)
                     .background(theme.secondaryBackground)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .accessibilityLabel("Message")
@@ -766,6 +766,7 @@ struct ComposerView: View {
                 } label: {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.system(size: 30))
+                        .frame(width: 32, height: 36)
                 }
                 .disabled(!canSend)
                 .accessibilityLabel("Send")
@@ -806,6 +807,7 @@ struct ComposerView: View {
             Image(systemName: "plus.circle.fill")
                 .font(.system(size: 30))
                 .foregroundColor(theme.accent)
+                .frame(width: 32, height: 36)
         }
         .accessibilityLabel("Add attachment")
     }
