@@ -755,9 +755,10 @@ struct ComposerView: View {
                 attachMenu
 
                 TextField("Message…", text: $text)
+                    .frame(maxWidth: .infinity)
                     .padding(.horizontal, 12)
                     .frame(height: 36)
-                    .background(theme.secondaryBackground)
+                    .background(Color.primary.opacity(0.08))
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .accessibilityLabel("Message")
 
