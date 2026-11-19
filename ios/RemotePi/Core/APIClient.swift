@@ -559,7 +559,7 @@ extension APIClient: WorkdirService {}
 /// can stub delivery and cancellation).
 protocol ChatQueueService {
     func sendTurn(_ id: String, message: String, force: Bool,
-                  clientMessageId: String?) async throws -> TurnResponse
+                  clientMessageId: String?, images: [PromptImage]?) async throws -> TurnResponse
     func fetchQueue(_ id: String) async throws -> [QueueItem]
     func cancelQueued(_ id: String, itemId: String) async throws
     func cancelQueuedByClient(_ id: String, clientMessageId: String) async throws

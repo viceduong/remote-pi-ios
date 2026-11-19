@@ -1420,7 +1420,7 @@ final class ChatViewModel: ObservableObject {
         while lifecycleActive, let item = offlinePending.first {
             do {
                 let resp = try await queueService.sendTurn(sessionId, message: item.text, force: false,
-                                                           clientMessageId: item.clientMessageId)
+                                                           clientMessageId: item.clientMessageId, images: nil)
                 offlinePending.removeAll { $0.id == item.id }
                 let delivered = resp.dispatched == true || !resp.queued
                 localPending.append(QueueItem(id: resp.queueItemId ?? "pending:\(item.clientMessageId)",

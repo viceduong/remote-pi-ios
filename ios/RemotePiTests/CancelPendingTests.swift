@@ -13,7 +13,7 @@ final class StubChatQueueService: ChatQueueService {
     var queue: [QueueItem] = []
 
     func sendTurn(_ id: String, message: String, force: Bool,
-                  clientMessageId: String?) async throws -> TurnResponse {
+                  clientMessageId: String?, images: [PromptImage]?) async throws -> TurnResponse {
         calls.append("send:\(clientMessageId ?? "")")
         // Deliberately ignores task cancellation: the server may answer a
         // request the client has already abandoned.
