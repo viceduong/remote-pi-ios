@@ -163,8 +163,8 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
         // Typing in the inline question card: keep the focused field above
         // the keyboard (the transcript itself shrinks with the keyboard).
         let nc = NotificationCenter.default
-        nc.addObserver(self, selector: #selector(keyboardWillChange), name: UIResponder.keyboardWillShowNotification, object: nil)
-        nc.addObserver(self, selector: #selector(keyboardWillChange), name: UIResponder.keyboardWillHideNotification, object: nil)
+        nc.addObserver(self, selector: #selector(keyboardWillChange(_:)), name: UIResponder.keyboardWillShowNotification, object: nil)
+        nc.addObserver(self, selector: #selector(keyboardWillChange(_:)), name: UIResponder.keyboardWillHideNotification, object: nil)
         nc.addObserver(self, selector: #selector(keyboardDidSettle), name: UIResponder.keyboardDidHideNotification, object: nil)
         nc.addObserver(self, selector: #selector(keyboardDidShow(_:)), name: UIResponder.keyboardDidShowNotification, object: nil)
         nc.addObserver(self, selector: #selector(textDidBeginEditing(_:)), name: UITextField.textDidBeginEditingNotification, object: nil)
@@ -508,8 +508,27 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
         window?.endEditing(true)
     }
 
-    @objc private func keyboardWillChange() {
+    @objc private func keyboardWillChange(_ note: Notification) {
         keyboardAnimating = true
+        // The transcript view stays full-height (it ignores the keyboard safe
+        // area), so when the keyboard + composer cover the bottom we grow the
+        // table's TOP inset (visual bottom, because the table is y-flipped) by
+        // the covered height, in ONE animation matched to the keyboard's curve.
+        // One inset change — not a per-frame reflow — keeps the newest message
+        // above the keyboard without stutter.
+        guard let info = note.userInfo,
+              let end = (info[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue,
+              let win = window else { return }
+        let overlap = max(0, bounds.maxY - convert(end.origin, from: win).y)
+        let targetTop = TranscriptMetrics.vPad + overlap
+        guard abs(tableView.contentInset.top - targetTop) > 0.5 else { return }
+        let pinned = isPinnedToBottom
+        let duration = (info[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
+        let curve = UIView.AnimationOptions(rawValue: ((info[UIResponder.keyboardAnimationCurveUserInfoKey] as? UInt) ?? 7) << 16)
+        UIView.animate(withDuration: duration, delay: 0, options: [curve, .beginFromCurrentState]) {
+            self.tableView.contentInset.top = targetTop
+            if pinned { self.tableView.contentOffset.y = self.bottomOffsetY }
+        }
     }
 
     @objc private func keyboardDidSettle() {

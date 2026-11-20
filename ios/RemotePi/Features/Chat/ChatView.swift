@@ -47,6 +47,11 @@ struct ChatView: View {
                                textScale: textScale,
                                contentSize: dynamicTypeSize.uiContentSizeCategory,
                                actions: transcriptActions)
+                // Keep the transcript full-height when the keyboard shows. The
+                // flipped UIKit table reflows as its bounds change, so letting
+                // SwiftUI shrink it frame-by-frame stutters; instead it stays
+                // put and only the composer inset rides the keyboard.
+                .ignoresSafeArea(.keyboard, edges: .bottom)
                 .overlay { loadingOverlay }
                 .sheet(isPresented: $showShells) {
                     BackgroundShellsSheet(model: shells, theme: theme)
