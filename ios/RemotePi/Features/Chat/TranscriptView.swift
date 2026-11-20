@@ -510,35 +510,18 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
 
     @objc private func keyboardWillChange(_ note: Notification) {
         keyboardAnimating = true
-        // The transcript view stays full-height (it ignores the keyboard safe
-        // area), so when the keyboard + composer cover the bottom we grow the
-        // table's TOP inset (visual bottom, because the table is y-flipped) by
-        // the covered height, in ONE animation matched to the keyboard's curve.
-        // One inset change — not a per-frame reflow — keeps the newest message
-        // above the keyboard without stutter.
-        guard let info = note.userInfo,
-              let end = (info[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue,
-              let win = window else { return }
-        let overlap = max(0, bounds.maxY - convert(end.origin, from: win).y)
-        let targetTop = TranscriptMetrics.vPad + overlap
-        guard abs(tableView.contentInset.top - targetTop) > 0.5 else { return }
-        let pinned = isPinnedToBottom
-        let duration = (info[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
-        let curve = UIView.AnimationOptions(rawValue: ((info[UIResponder.keyboardAnimationCurveUserInfoKey] as? UInt) ?? 7) << 16)
-        UIView.animate(withDuration: duration, delay: 0, options: [curve, .beginFromCurrentState]) {
-            self.tableView.contentInset.top = targetTop
-            if pinned { self.tableView.contentOffset.y = self.bottomOffsetY }
-        }
     }
 
     @objc private func keyboardDidSettle() {
         keyboardAnimating = false
-        if isPinnedToBottom { pinToBottom() }
     }
 
     @objc private func keyboardDidShow(_ note: Notification) {
         keyboardAnimating = false
-        if isPinnedToBottom { pinToBottom() }
+        // Do not move the transcript content for the keyboard — any inset/offset
+        // change here shifts the visible text, which reads as a stutter. The
+        // transcript stays put (it ignores the keyboard safe area); only a
+        // focused question-card input is scrolled into view, below.
         revealFocusedQuestionInput(animated: true)
     }
 
