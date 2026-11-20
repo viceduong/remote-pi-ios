@@ -47,6 +47,11 @@ struct ChatView: View {
                                textScale: textScale,
                                contentSize: dynamicTypeSize.uiContentSizeCategory,
                                actions: transcriptActions)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // The UIKit transcript manages its own keyboard scrolling; keep
+                // SwiftUI from also shrinking it, which left a gap above the
+                // keyboard. Only the bottom inset (composer) rides the keyboard.
+                .ignoresSafeArea(.keyboard, edges: .bottom)
                 .overlay { loadingOverlay }
                 .sheet(isPresented: $showShells) {
                     BackgroundShellsSheet(model: shells, theme: theme)
