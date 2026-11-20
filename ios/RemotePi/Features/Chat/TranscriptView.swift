@@ -149,6 +149,12 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
         tableView.accessibilityLabel = "Conversation"
         addSubview(tableView)
 
+        // Tap anywhere in the transcript to dismiss the keyboard. cancelsTouchesInView
+        // is false so cell taps (menus, links, row actions) still fire.
+        let dismissTap = UITapGestureRecognizer(target: self, action: #selector(dismissKeyboard))
+        dismissTap.cancelsTouchesInView = false
+        tableView.addGestureRecognizer(dismissTap)
+
         // Typing in the inline question card: keep the focused field above
         // the keyboard (the transcript itself shrinks with the keyboard).
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardDidShow(_:)),
@@ -484,6 +490,12 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
         let y = rect.maxY + TranscriptMetrics.vPad - tableView.bounds.height
         guard y > bottomOffsetY else { return }
         tableView.contentOffset = CGPoint(x: tableView.contentOffset.x, y: y)
+    }
+
+    @objc private func dismissKeyboard() {
+        // Resign any first responder (the SwiftUI composer field or a question
+        // card input) by ending editing on the whole window.
+        window?.endEditing(true)
     }
 
     @objc private func keyboardDidShow(_ note: Notification) {
