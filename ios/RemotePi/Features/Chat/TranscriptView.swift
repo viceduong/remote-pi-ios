@@ -105,6 +105,11 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
     /// Explicit "go to bottom" (send / button): keep pinning updates that
     /// land shortly afterwards, even mid-animation.
     private var pinUntil = Date.distantPast
+    /// True while the keyboard is animating in/out. SwiftUI shrinks our frame
+    /// over that interval, firing layoutSubviews every frame; re-pinning the
+    /// flipped table's content offset each frame makes the content stutter, so
+    /// we skip the re-pin until the keyboard settles.
+    private var keyboardAnimating = false
     private static let initialChunk = 40
     /// Builds the hosted question card (set by `TranscriptView`); nil → a
     /// plain-text fallback.
@@ -157,10 +162,12 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
 
         // Typing in the inline question card: keep the focused field above
         // the keyboard (the transcript itself shrinks with the keyboard).
-        NotificationCenter.default.addObserver(self, selector: #selector(keyboardDidShow(_:)),
-                                               name: UIResponder.keyboardDidShowNotification, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(textDidBeginEditing(_:)),
-                                               name: UITextField.textDidBeginEditingNotification, object: nil)
+        let nc = NotificationCenter.default
+        nc.addObserver(self, selector: #selector(keyboardWillChange), name: UIResponder.keyboardWillShowNotification, object: nil)
+        nc.addObserver(self, selector: #selector(keyboardWillChange), name: UIResponder.keyboardWillHideNotification, object: nil)
+        nc.addObserver(self, selector: #selector(keyboardDidSettle), name: UIResponder.keyboardDidHideNotification, object: nil)
+        nc.addObserver(self, selector: #selector(keyboardDidShow(_:)), name: UIResponder.keyboardDidShowNotification, object: nil)
+        nc.addObserver(self, selector: #selector(textDidBeginEditing(_:)), name: UITextField.textDidBeginEditingNotification, object: nil)
 
         dataSource = UITableViewDiffableDataSource<Int, String>(tableView: tableView) { [weak self] table, indexPath, id in
             if let self, let item = self.items[id], item.kind == .question {
@@ -238,7 +245,10 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
         if tableView.bounds.size != size {
             let pinned = isPinnedToBottom
             tableView.bounds = CGRect(origin: tableView.bounds.origin, size: size)
-            if pinned { pinToBottom() }
+            // During the keyboard animation SwiftUI resizes us every frame;
+            // re-pinning here makes the flipped content jump. Pin once when the
+            // keyboard settles (keyboardDidShow/keyboardDidSettle) instead.
+            if pinned, !keyboardAnimating { pinToBottom() }
         }
         tableView.center = CGPoint(x: bounds.midX, y: bounds.midY)
         scrollButton.frame = CGRect(x: size.width - 14 - 38, y: size.height - 10 - 38, width: 38, height: 38)
@@ -498,7 +508,18 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
         window?.endEditing(true)
     }
 
+    @objc private func keyboardWillChange() {
+        keyboardAnimating = true
+    }
+
+    @objc private func keyboardDidSettle() {
+        keyboardAnimating = false
+        if isPinnedToBottom { pinToBottom() }
+    }
+
     @objc private func keyboardDidShow(_ note: Notification) {
+        keyboardAnimating = false
+        if isPinnedToBottom { pinToBottom() }
         revealFocusedQuestionInput(animated: true)
     }
 
@@ -513,6 +534,11 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
     /// Keep the card's focused text field visible above the keyboard.
     private func revealFocusedQuestionInput(animated: Bool) {
         guard window != nil else { return }
+        // Only question cards host a focusable field; if none is visible there
+        // is nothing to reveal (the composer is a separate SwiftUI view), so
+        // skip the forced layout that otherwise hitched the keyboard animation.
+        let hasFocusedCard = tableView.visibleCells.contains { ($0 as? QuestionCell)?.focusedInput != nil }
+        guard hasFocusedCard else { return }
         layoutIfNeeded()
         for case let cell as QuestionCell in tableView.visibleCells {
             guard let input = cell.focusedInput else { continue }
