@@ -20,7 +20,6 @@ struct ChatView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     @StateObject private var viewModel: ChatViewModel
-    @StateObject private var keyboard = KeyboardHeight()
     @State private var selectedText: SelectableText?
     /// Contract §16 background shells. Held WITHOUT observation (badge,
     /// button and sheet observe it themselves), so its 10 s poll never
@@ -39,14 +38,6 @@ struct ChatView: View {
         _shells = State(initialValue: BackgroundShellsModel(service: client, sessionId: session.id))
     }
 
-    /// Home-indicator inset the bottom safe area already reserves; the keyboard
-    /// height is measured to the screen edge, so subtract it to avoid a double gap.
-    private var bottomSafeInset: CGFloat {
-        UIApplication.shared.connectedScenes
-            .compactMap { ($0 as? UIWindowScene)?.keyWindow }
-            .first?.safeAreaInsets.bottom ?? 0
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             HostOwnershipBanner(status: viewModel.status, client: client, sessionId: session.id,
@@ -57,19 +48,19 @@ struct ChatView: View {
                                contentSize: dynamicTypeSize.uiContentSizeCategory,
                                actions: transcriptActions)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // The UIKit transcript scrolls itself for the keyboard; stop
+                // SwiftUI from also shrinking it (that left a gap above the
+                // keyboard). Only the bottom inset (composer) rides the keyboard.
+                .ignoresSafeArea(.keyboard, edges: .bottom)
                 .overlay { loadingOverlay }
                 .sheet(isPresented: $showShells) {
                     BackgroundShellsSheet(model: shells, theme: theme)
                 }
         }
-        // We drive keyboard avoidance ourselves (KeyboardHeight) so the composer
-        // moves on the keyboard's exact animation curve — SwiftUI's own
-        // safe-area avoidance lagged, flashing a gap above the keyboard. Ignore
-        // the SwiftUI keyboard inset and pad the bottom bar by the live height.
-        .ignoresSafeArea(.keyboard, edges: .bottom)
+        // Composer + status bars ride the bottom safe-area inset: SwiftUI docks
+        // them above the keyboard and the transcript ends at their top edge.
         .safeAreaInset(edge: .bottom, spacing: 0) {
             ChatBottomBar(viewModel: viewModel, status: viewModel.status, shells: shells)
-                .padding(.bottom, max(0, keyboard.height - bottomSafeInset))
         }
         .background(theme.background)
         .navigationTitle(session.name)
