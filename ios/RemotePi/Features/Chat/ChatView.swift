@@ -20,7 +20,6 @@ struct ChatView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     @StateObject private var viewModel: ChatViewModel
-    @StateObject private var keyboard = KeyboardHeight()
     @State private var selectedText: SelectableText?
     /// Contract §16 background shells. Held WITHOUT observation (badge,
     /// button and sheet observe it themselves), so its 10 s poll never
@@ -39,15 +38,6 @@ struct ChatView: View {
         _shells = State(initialValue: BackgroundShellsModel(service: client, sessionId: session.id))
     }
 
-    /// Home-indicator inset the bottom safe area already reserves. The keyboard
-    /// height is measured to the screen edge, so the lift is keyboardHeight minus
-    /// this (the keyboard covers the home-indicator region).
-    private var bottomSafeInset: CGFloat {
-        UIApplication.shared.connectedScenes
-            .compactMap { ($0 as? UIWindowScene)?.keyWindow }
-            .first?.safeAreaInsets.bottom ?? 0
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             HostOwnershipBanner(status: viewModel.status, client: client, sessionId: session.id,
@@ -62,16 +52,10 @@ struct ChatView: View {
                     BackgroundShellsSheet(model: shells, theme: theme)
                 }
         }
-        // The composer rests in the bottom safe-area inset (above the home
-        // indicator). We disable SwiftUI's own keyboard avoidance and instead
-        // lift the bar by the keyboard height on the keyboard's exact animation
-        // curve (KeyboardHeight), so it tracks in lockstep with no settle
-        // stutter. Lift = keyboardHeight − the home-indicator inset the keyboard
-        // already covers; 0 when the keyboard is hidden.
-        .ignoresSafeArea(.keyboard, edges: .bottom)
+        // Composer + status bars ride the bottom safe-area inset: SwiftUI docks
+        // them above the keyboard and the transcript ends at their top edge.
         .safeAreaInset(edge: .bottom, spacing: 0) {
             ChatBottomBar(viewModel: viewModel, status: viewModel.status, shells: shells)
-                .offset(y: -max(0, keyboard.height - bottomSafeInset))
         }
         .background(theme.background)
         .navigationTitle(session.name)
