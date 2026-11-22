@@ -452,6 +452,9 @@ struct WireMessage: Decodable {
     let qa: Lenient<QAInfo>?
     /// Contract §13: stable transcript identity (absent on older servers).
     let key: String?
+    /// Image attachments metadata on a user row (absent on older servers /
+    /// rows without images).
+    let images: [Lenient<MessageImageRef>]?
 
     func toChatMessage() -> ChatMessage {
         let rawRole = self.role
@@ -476,7 +479,7 @@ struct WireMessage: Decodable {
             message.qa = qa?.value
             return message
         }
-        return ChatMessage(
+        var message = ChatMessage(
             entryId: id,
             clientMessageId: role == .user ? clientMessageId : nil,
             role: role,
@@ -491,6 +494,11 @@ struct WireMessage: Decodable {
             timestamp: timestamp,
             key: key
         )
+        if role == .user, let images {
+            let refs = images.compactMap { $0.value }
+            if !refs.isEmpty { message.images = refs }
+        }
+        return message
     }
 }
 
@@ -530,6 +538,14 @@ struct AnyJSON: Decodable {
 /// §17: a base64 image attached to a prompt (raw base64, no data: prefix).
 struct PromptImage: Encodable, Equatable {
     let data: String
+    let mimeType: String
+}
+
+/// Metadata for one image attached to a user message (no bytes). The raw
+/// bytes are fetched lazily from
+/// `GET /api/sessions/:id/messages/:entryId/images/:index`.
+struct MessageImageRef: Codable, Equatable {
+    let index: Int
     let mimeType: String
 }
 
@@ -585,6 +601,10 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     /// derived from the timestamp for pre-§13 servers
     /// (`ChatViewModel.identified`).
     var key: String?
+    /// Image attachments on a user row (metadata only; bytes fetched lazily
+    /// from the image endpoint keyed on `entryId` + `index`). Empty when the
+    /// row has no images.
+    var images: [MessageImageRef] = []
 
     init(id: String? = nil, entryId: String? = nil, clientMessageId: String? = nil,
          role: MessageRole, text: String, thinking: String?, toolCalls: [ToolCall],
@@ -611,7 +631,7 @@ struct ChatMessage: Identifiable, Equatable, Codable {
     enum CodingKeys: String, CodingKey {
         case id, entryId, clientMessageId, role, text, thinking, toolCalls
         case isError, toolName, isSystemNote, model
-        case errorMessage, timestamp, qa, key
+        case errorMessage, timestamp, qa, key, images
     }
 
     init(from decoder: Decoder) throws {
@@ -633,6 +653,7 @@ struct ChatMessage: Identifiable, Equatable, Codable {
         timestamp = try c.decodeIfPresent(Int.self, forKey: .timestamp)
         qa = try? c.decodeIfPresent(QAInfo.self, forKey: .qa)
         key = try? c.decodeIfPresent(String.self, forKey: .key)
+        images = ((try? c.decodeIfPresent([MessageImageRef].self, forKey: .images)) ?? []) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -652,6 +673,7 @@ struct ChatMessage: Identifiable, Equatable, Codable {
         try c.encodeIfPresent(timestamp, forKey: .timestamp)
         try c.encodeIfPresent(qa, forKey: .qa)
         try c.encodeIfPresent(key, forKey: .key)
+        if !images.isEmpty { try c.encode(images, forKey: .images) }
     }
 
     /// Retain at most one consecutive blank line, trim leading/trailing

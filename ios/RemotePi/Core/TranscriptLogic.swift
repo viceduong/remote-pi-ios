@@ -23,7 +23,10 @@ extension ChatMessage {
         case .tool:
             return false
         case .user:
-            return !m.isSystemNote && m.text.hasVisibleCharacters
+            // Image-only prompts (no text) are still visible when they carry
+            // fetchable image attachments (entryId present).
+            return !m.isSystemNote
+                && (m.text.hasVisibleCharacters || (m.entryId != nil && !m.images.isEmpty))
         case .assistant:
             return m.text.hasVisibleCharacters || m.isErrorRow
         }
@@ -67,6 +70,9 @@ struct TranscriptItem: Equatable {
     var kind: Kind
     var text: String
     var entryId: String? = nil
+    /// Image attachments on a user row (metadata only; bytes fetched lazily
+    /// via `MessageImageLoader` keyed on `entryId` + `index`).
+    var images: [MessageImageRef] = []
     var streaming = false
     /// Chip header ("queued · 2m", "sending…", "waiting for agent · after
     /// current step", "waiting for connection").

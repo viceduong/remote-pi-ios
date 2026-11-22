@@ -28,6 +28,7 @@ struct TranscriptView: UIViewRepresentable {
         let view = TranscriptContainerView(style: TranscriptStyle(theme: theme, textScale: textScale,
                                                                   contentSize: contentSize))
         view.actions = actions
+        view.imageLoader = viewModel.imageLoader
         let vm = viewModel
         view.questionContent = { question in
             AnyView(QuestionCardView(viewModel: vm, question: question))
@@ -114,6 +115,9 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
     /// Builds the hosted question card (set by `TranscriptView`); nil → a
     /// plain-text fallback.
     var questionContent: (@MainActor (AgentQuestion) -> AnyView)?
+    /// Shared loader/cache for user-message image attachments (set by
+    /// `TranscriptView`); nil in previews / tests → cells skip image loading.
+    var imageLoader: MessageImageLoader?
     /// Offscreen controller used only to measure the question card.
     private lazy var measuringHost = UIHostingController(rootView: AnyView(EmptyView()))
 
@@ -427,7 +431,8 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
     private func configure(_ cell: TranscriptCell, id: String) {
         guard let item = items[id] else { return }
         let render = rows[id] ?? syncRender(item)
-        cell.configure(item: item, render: render, style: style, expanded: expanded.contains(id))
+        cell.configure(item: item, render: render, style: style, expanded: expanded.contains(id),
+                       imageLoader: imageLoader)
         cell.onAction = { [weak self] in self?.performRowAction(id: id) }
         cell.onSteer = { [weak self] in self?.performSteer(id: id) }
         cell.onToggleExpand = { [weak self] in self?.toggleExpanded(id: id) }

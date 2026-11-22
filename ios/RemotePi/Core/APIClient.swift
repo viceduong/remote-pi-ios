@@ -264,6 +264,16 @@ struct APIClient {
                            cursorMode: wrapper.cursorMode)
     }
 
+    /// Raw bytes for one image attached to a user message.
+    /// `GET /api/sessions/:id/messages/:entryId/images/:index` (Content-Type =
+    /// the image's mimeType, immutable-cached). `entryId` is the message's
+    /// entryId; `index` is the image's 0-based position among that row's images.
+    func imageData(_ sessionId: String, entryId: String, index: Int) async throws -> Data {
+        let entrySegment = try Self.pathSegment(entryId)
+        let path = "/api/sessions/\(sessionId)/messages/\(entrySegment)/images/\(index)"
+        return try await send(makeRequest(path))
+    }
+
     /// One answer inside a questionnaire response (mirrors pi's QuestionAnswer).
     struct QuestionAnswerPayload: Encodable {
         let questionIndex: Int

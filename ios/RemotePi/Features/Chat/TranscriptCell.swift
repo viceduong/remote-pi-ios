@@ -97,6 +97,19 @@ final class TranscriptCell: UITableViewCell {
     private var activeSegmentViews: [Int: AttributedTextView] = [:]
     private var freeSegmentViews: [AttributedTextView] = []
 
+    // MARK: Image attachments
+    /// One image view per visible thumbnail (created on demand, reused).
+    private var imageViews: [UIImageView] = []
+    /// Image metadata for the current row (user rows only).
+    private var imageRefs: [MessageImageRef] = []
+    /// entryId of the current row's images (nil = none / not fetchable).
+    private var imageEntryId: String?
+    /// Shared loader (set per configure); nil → skip image loading.
+    private weak var imageLoader: MessageImageLoader?
+    /// Token bumped on every configure/reuse; an async thumbnail load checks
+    /// it before assigning, so a recycled cell never shows another row's image.
+    private var imageToken = 0
+
     var onAction: (() -> Void)?
     var onSteer: (() -> Void)?
     var onToggleExpand: (() -> Void)?
@@ -153,9 +166,19 @@ final class TranscriptCell: UITableViewCell {
         onToggleExpand = nil
         // Free segment backing stores right away (the next row may be short).
         recycleAllSegments()
+        // Invalidate any in-flight thumbnail loads and clear the images.
+        imageToken &+= 1
+        imageRefs = []
+        imageEntryId = nil
+        imageLoader = nil
+        for view in imageViews {
+            view.image = nil
+            view.isHidden = true
+        }
     }
 
-    func configure(item: TranscriptItem, render: RowRender, style: TranscriptStyle, expanded: Bool) {
+    func configure(item: TranscriptItem, render: RowRender, style: TranscriptStyle, expanded: Bool,
+                   imageLoader: MessageImageLoader? = nil) {
         kind = item.kind
         layout = render.layout
         fullBody = render.body
@@ -264,7 +287,81 @@ final class TranscriptCell: UITableViewCell {
         } else {
             footerButton.isHidden = true
         }
+
+        configureImages(item: item, style: style, loader: imageLoader)
         setNeedsLayout()
+    }
+
+    // MARK: Image attachments
+
+    private func configureImages(item: TranscriptItem, style: TranscriptStyle,
+                                 loader: MessageImageLoader?) {
+        // New content: invalidate any in-flight loads from the previous row.
+        imageToken &+= 1
+        let count = min(item.images.count, layout.imageThumbs.count)
+        // Only user rows with a fetchable entryId carry images (the layout
+        // already dropped the rest), but guard defensively.
+        if item.kind == .user, let entryId = item.entryId, count > 0, let loader {
+            imageRefs = Array(item.images.prefix(count))
+            imageEntryId = entryId
+            imageLoader = loader
+        } else {
+            imageRefs = []
+            imageEntryId = nil
+            imageLoader = nil
+        }
+
+        // Grow the pool to the number of thumbnails; hide the surplus.
+        while imageViews.count < imageRefs.count {
+            let view = UIImageView()
+            view.contentMode = .scaleAspectFit
+            view.clipsToBounds = true
+            view.layer.cornerRadius = TranscriptMetrics.imageThumbCorner
+            view.layer.cornerCurve = .continuous
+            view.isAccessibilityElement = true
+            view.accessibilityTraits = .image
+            view.accessibilityLabel = "Attached image"
+            contentView.addSubview(view)
+            imageViews.append(view)
+        }
+        for (i, view) in imageViews.enumerated() {
+            if i < imageRefs.count {
+                view.isHidden = false
+                // Placeholder until the bytes load.
+                view.image = nil
+                view.backgroundColor = style.secondaryBackground
+            } else {
+                view.isHidden = true
+                view.image = nil
+            }
+        }
+
+        loadThumbnails()
+    }
+
+    private func loadThumbnails() {
+        guard let loader = imageLoader, let entryId = imageEntryId else { return }
+        let token = imageToken
+        for (i, ref) in imageRefs.enumerated() {
+            guard i < imageViews.count else { break }
+            let view = imageViews[i]
+            // Fast path: already cached → assign synchronously, no flicker.
+            if let cached = loader.cachedImage(entryId: entryId, index: ref.index) {
+                view.image = cached
+                view.backgroundColor = .clear
+                continue
+            }
+            let index = ref.index
+            Task { @MainActor [weak self, weak loader, weak view] in
+                guard let loader else { return }
+                let image = await loader.image(entryId: entryId, index: index)
+                guard let self, let view, let image else { return }
+                // Reuse guard: the cell must still be showing THIS row's image.
+                guard self.imageToken == token, self.imageEntryId == entryId else { return }
+                view.image = image
+                view.backgroundColor = .clear
+            }
+        }
     }
 
     override func layoutSubviews() {
@@ -306,6 +403,13 @@ final class TranscriptCell: UITableViewCell {
         }
         if !footerButton.isHidden {
             footerButton.frame = l.footer
+        }
+        for (i, view) in imageViews.enumerated() where !view.isHidden {
+            if i < l.imageThumbs.count {
+                view.frame = l.imageThumbs[i]
+            } else {
+                view.isHidden = true
+            }
         }
         updateVisibleSegments()
     }

@@ -119,6 +119,11 @@ final class ChatViewModel: ObservableObject {
     /// Send / queue / cancel endpoints (the client itself; stubbed in tests).
     private let queueService: any ChatQueueService
     private let sessionId: String
+    /// Session id for image attachment fetches (transcript cells key on it).
+    var imageSessionId: String { sessionId }
+    /// Lazily created loader/cache for user-message image attachments. Shared
+    /// by every transcript cell so the cache survives cell reuse.
+    private(set) lazy var imageLoader = MessageImageLoader(fetcher: client, sessionId: sessionId)
     private let offlineStore: OfflineQueueStore
     private var eventSource: EventSource?
 
@@ -410,7 +415,8 @@ final class ChatViewModel: ObservableObject {
         }
         switch m.role {
         case .user:
-            return TranscriptItem(id: m.id, kind: .user, text: m.text, entryId: m.entryId)
+            return TranscriptItem(id: m.id, kind: .user, text: m.text, entryId: m.entryId,
+                                  images: m.entryId != nil ? m.images : [])
         case .assistant, .tool:
             if m.isErrorRow {
                 var text = m.text

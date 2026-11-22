@@ -88,6 +88,9 @@ struct RowLayout: Equatable {
     /// Tall bodies are drawn as stacked segments (empty = one view draws the
     /// whole body). Frames tile `text` exactly.
     var chunks: [Chunk] = []
+    /// Image-attachment thumbnail frames (user rows), stacked above the
+    /// bubble, trailing-aligned. Empty when the row has no images.
+    var imageThumbs: [CGRect] = []
 }
 
 /// Everything a cell needs for one row, cached per row id.
@@ -118,6 +121,13 @@ enum TranscriptMetrics {
     static let footerGap: CGFloat = 6
     static let userCorner: CGFloat = 16
     static let errorCorner: CGFloat = 12
+    /// Image attachment thumbnails (user rows).
+    static let imageThumbHeight: CGFloat = 110
+    static let imageThumbWidth: CGFloat = 160
+    static let imageThumbCorner: CGFloat = 10
+    static let imageThumbGap: CGFloat = 6
+    /// Cap on thumbnails rendered per row (rest are not shown).
+    static let maxImageThumbs = 6
     /// Collapse thresholds for long user inputs (logs, dumps, pastes).
     static let collapseChars = 1_200
     static let collapseLines = 20
@@ -136,7 +146,7 @@ enum TranscriptRenderer {
     }
 
     static func renderKey(_ item: TranscriptItem, expanded: Bool, styleKey: String) -> String {
-        "\(item.kind.rawValue)|\(item.text.utf8.count)|\(item.text.hashValue)|\(item.streaming ? 1 : 0)|\(expanded ? 1 : 0)|\(item.statusText ?? "")|\(item.cancellable ? 1 : 0)|\(item.canSteer ? 1 : 0)|\(styleKey)"
+        "\(item.kind.rawValue)|\(item.text.utf8.count)|\(item.text.hashValue)|\(item.streaming ? 1 : 0)|\(expanded ? 1 : 0)|\(item.statusText ?? "")|\(item.cancellable ? 1 : 0)|\(item.canSteer ? 1 : 0)|img:\(item.entryId ?? "")#\(item.images.count)|\(styleKey)"
     }
 
     static func lineCount(_ text: String) -> Int {
@@ -259,14 +269,34 @@ enum TranscriptRenderer {
             let maxBubble = max(60, width - 2 * M.hPad - M.userLeadingMin)
             let maxText = max(20, maxBubble - 2 * M.bubbleHPad)
             let (size, chunks) = measureBlock(body, maxWidth: maxText)
-            let bubbleSize = CGSize(width: size.width + 2 * M.bubbleHPad, height: size.height + 2 * M.bubbleVPad)
-            l.bubble = CGRect(x: width - M.hPad - bubbleSize.width, y: M.vPad,
-                              width: bubbleSize.width, height: bubbleSize.height)
-            l.text = CGRect(x: l.bubble.minX + M.bubbleHPad, y: l.bubble.minY + M.bubbleVPad,
-                            width: size.width, height: size.height)
-            l.drawWidth = maxText
-            l.chunks = place(chunks, in: l.text)
-            var bottom = l.bubble.maxY
+            // Image attachments (trailing-aligned, stacked above the bubble).
+            // Only rows with a resolvable entryId carry images (bytes are
+            // fetchable); the container clears `images` otherwise.
+            var topY = M.vPad
+            if !item.images.isEmpty {
+                let thumbW = min(M.imageThumbWidth, max(60, width - 2 * M.hPad))
+                let thumbX = width - M.hPad - thumbW
+                var y = topY
+                for _ in item.images.prefix(M.maxImageThumbs) {
+                    l.imageThumbs.append(CGRect(x: thumbX, y: y,
+                                                width: thumbW, height: M.imageThumbHeight))
+                    y += M.imageThumbHeight + M.imageThumbGap
+                }
+                topY = y
+            }
+            let hasText = size.height > 0
+            if hasText {
+                let bubbleSize = CGSize(width: size.width + 2 * M.bubbleHPad, height: size.height + 2 * M.bubbleVPad)
+                l.bubble = CGRect(x: width - M.hPad - bubbleSize.width, y: topY,
+                                  width: bubbleSize.width, height: bubbleSize.height)
+                l.text = CGRect(x: l.bubble.minX + M.bubbleHPad, y: l.bubble.minY + M.bubbleVPad,
+                                width: size.width, height: size.height)
+                l.drawWidth = maxText
+                l.chunks = place(chunks, in: l.text)
+            }
+            // No bubble when the row is images-only: anchor the footer/bottom
+            // on the last thumbnail instead.
+            var bottom = hasText ? l.bubble.maxY : (l.imageThumbs.last?.maxY ?? topY)
             if isLongUserText(item) {
                 let title = footerTitle(for: item, expanded: expanded)
                 let titleWidth = ceil((title as NSString).size(withAttributes: [.font: style.footerFont]).width)
