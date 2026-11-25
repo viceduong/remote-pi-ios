@@ -15,6 +15,8 @@ struct ChatView: View {
     let session: SessionSummary
     private let client: APIClient
     @AppStorage("chatTextScale") private var textScale: Double = 1.0
+    @AppStorage("showThinking") private var showThinking = false
+    @AppStorage("showToolCalls") private var showToolCalls = false
     @Environment(\.theme) private var theme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.scenePhase) private var scenePhase
@@ -84,6 +86,9 @@ struct ChatView: View {
         .task { await viewModel.start() }
         // §16 shells poll (10 s) + activity watch; idempotent per appear.
         .onAppear { shells.start(observing: viewModel.status) }
+        // Thinking / tool-call visibility toggles rebuild the transcript at once.
+        .onChange(of: showThinking) { _ in viewModel.commitNow() }
+        .onChange(of: showToolCalls) { _ in viewModel.commitNow() }
         .onChange(of: scenePhase) { phase in
             // Only a real background transition suspends the network:
             // `.inactive` (control centre, app switcher peek, alerts) must not

@@ -349,7 +349,14 @@ final class ChatViewModel: ObservableObject {
     /// once per main-loop turn; never runs during a SwiftUI `body`.
     func commitNow() {
         commitScheduled = false
-        visibleMessages = messages.filter(ChatMessage.isVisibleInFocus)
+        let showThinking = UserDefaults.standard.bool(forKey: "showThinking")
+        let showToolCalls = UserDefaults.standard.bool(forKey: "showToolCalls")
+        // Tool-result rows (role .tool, not Q&A) are normally hidden; they
+        // become visible (as collapsible `.toolCall` rows) only when the
+        // "Show tool calls" setting is on.
+        visibleMessages = messages.filter {
+            ChatMessage.isVisibleInFocus($0) || (showToolCalls && $0.role == .tool && $0.qa == nil)
+        }
 
         expireStaleLocalPending()
         pruneSteering()
@@ -368,7 +375,9 @@ final class ChatViewModel: ObservableObject {
         items.reserveCapacity(visibleMessages.count + reconciled.chips.count + offlinePending.count)
         let streamingId = store.inProgressId
         for m in visibleMessages {
-            items.append(ChatViewModel.transcriptItem(for: m, streaming: m.id == streamingId))
+            ChatViewModel.appendTranscriptItems(for: m, streaming: m.id == streamingId,
+                                                showThinking: showThinking, showToolCalls: showToolCalls,
+                                                into: &items)
         }
         var chipClientIds = Set<String>()
         for chip in reconciled.chips {
@@ -427,6 +436,49 @@ final class ChatViewModel: ObservableObject {
             }
             return TranscriptItem(id: m.id, kind: .assistant, text: m.text, entryId: m.entryId,
                                   streaming: streaming)
+        }
+    }
+
+    /// Build the transcript rows for one message, honouring the thinking /
+    /// tool-call settings. An assistant message can yield up to:
+    /// a `.thinking` row (when enabled and non-empty), its normal text row,
+    /// and one `.toolCall` row per tool call (when enabled). A tool-RESULT
+    /// row (role .tool, not Q&A) yields a single `.toolCall` row carrying the
+    /// output. The streaming placeholder keeps its single text row — thinking
+    /// / tool calls are only populated on settled messages.
+    nonisolated static func appendTranscriptItems(for m: ChatMessage, streaming: Bool,
+                                                  showThinking: Bool, showToolCalls: Bool,
+                                                  into items: inout [TranscriptItem]) {
+        // Tool-result row surfaced only when the setting is on; Q&A and error
+        // rows are handled by `transcriptItem` below.
+        if m.qa == nil, m.role == .tool {
+            if showToolCalls {
+                items.append(TranscriptItem(id: "\(m.id)#tool", kind: .toolCall, text: m.text,
+                                            entryId: m.entryId,
+                                            toolName: m.toolName ?? m.role.rawValue))
+            }
+            return
+        }
+        let main = transcriptItem(for: m, streaming: streaming)
+        // Only settled assistant rows carry thinking / tool calls; an error
+        // row has neither, so decorate only normal assistant text rows.
+        guard !streaming, main.kind == .assistant else {
+            items.append(main)
+            return
+        }
+        if showThinking, let thinking = m.thinking, thinking.hasVisibleCharacters {
+            items.append(TranscriptItem(id: "\(m.id)#think", kind: .thinking, text: thinking,
+                                        entryId: m.entryId))
+        }
+        if main.text.hasVisibleCharacters {
+            items.append(main)
+        }
+        if showToolCalls {
+            for (i, call) in m.toolCalls.enumerated() {
+                items.append(TranscriptItem(id: "\(m.id)#tool\(i)", kind: .toolCall,
+                                            text: call.argumentsText, entryId: m.entryId,
+                                            toolName: call.name))
+            }
         }
     }
 
@@ -597,22 +649,23 @@ final class ChatViewModel: ObservableObject {
         lowestFetchedTs = min(lowestFetchedTs ?? Int.max, low)
     }
 
-    /// Tool rows are never rendered (focus mode is fixed on) — keep them out
-    /// of the model entirely. Exception: Q&A rows (contract §9).
-    nonisolated static func displayable(_ rows: [ChatMessage]) -> [ChatMessage] {
-        rows.filter { $0.role != .tool || $0.qa != nil }
+    /// Tool rows are normally kept out of the model entirely. Exceptions:
+    /// Q&A rows (contract §9), always kept; and, when `showToolCalls` is on,
+    /// tool-result rows too (surfaced as collapsible `.toolCall` rows).
+    nonisolated static func displayable(_ rows: [ChatMessage], showToolCalls: Bool = false) -> [ChatMessage] {
+        rows.filter { $0.role != .tool || $0.qa != nil || showToolCalls }
     }
 
     /// History rows as stored: displayable, with an identity (server `key`,
     /// else the derived pre-§13 key — see `identified`).
-    nonisolated static func prepareHistory(_ rows: [ChatMessage]) -> [ChatMessage] {
-        displayable(rows).map { identified($0, key: nil) }
+    nonisolated static func prepareHistory(_ rows: [ChatMessage], showToolCalls: Bool = false) -> [ChatMessage] {
+        displayable(rows, showToolCalls: showToolCalls).map { identified($0, key: nil) }
     }
 
     /// Note whether a page comes from a §13 server, then prepare its rows.
     private func historyRows(_ page: [ChatMessage]) -> [ChatMessage] {
         if !serverKeyed, page.contains(where: { $0.key != nil }) { serverKeyed = true }
-        return ChatViewModel.prepareHistory(page)
+        return ChatViewModel.prepareHistory(page, showToolCalls: UserDefaults.standard.bool(forKey: "showToolCalls"))
     }
 
     /// Delta refresh by entry-id cursor. Coalesced: concurrent callers share

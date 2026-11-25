@@ -64,6 +64,13 @@ struct TranscriptItem: Equatable {
         /// newest row while unanswered; hosts the interactive SwiftUI card
         /// (not a text row — never rendered/segmented by `TranscriptRenderer`).
         case question
+        /// A collapsible assistant thinking block (`text` is the thinking),
+        /// shown only when the "Show thinking" setting is on.
+        case thinking
+        /// A collapsible tool call / tool result row (`text` is the arguments
+        /// or output, `toolName` the header label), shown only when the
+        /// "Show tool calls" setting is on.
+        case toolCall
     }
 
     var id: String
@@ -90,6 +97,9 @@ struct TranscriptItem: Equatable {
     /// Pending question rows: the questionnaire shown by the inline card
     /// (`text` is a plain copy of the questions; `actionId` the requestId).
     var question: AgentQuestion? = nil
+    /// Tool-call rows (`.toolCall`): the tool name shown in the collapsed
+    /// header ("⚙ <toolName>"). nil on every other kind.
+    var toolName: String? = nil
 }
 
 // MARK: - Queue chip reconciliation (one chip per logical message)

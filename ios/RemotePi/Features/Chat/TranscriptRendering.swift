@@ -146,7 +146,7 @@ enum TranscriptRenderer {
     }
 
     static func renderKey(_ item: TranscriptItem, expanded: Bool, styleKey: String) -> String {
-        "\(item.kind.rawValue)|\(item.text.utf8.count)|\(item.text.hashValue)|\(item.streaming ? 1 : 0)|\(expanded ? 1 : 0)|\(item.statusText ?? "")|\(item.cancellable ? 1 : 0)|\(item.canSteer ? 1 : 0)|img:\(item.entryId ?? "")#\(item.images.count)|\(styleKey)"
+        "\(item.kind.rawValue)|\(item.text.utf8.count)|\(item.text.hashValue)|\(item.streaming ? 1 : 0)|\(expanded ? 1 : 0)|\(item.statusText ?? "")|\(item.toolName ?? "")|\(item.cancellable ? 1 : 0)|\(item.canSteer ? 1 : 0)|img:\(item.entryId ?? "")#\(item.images.count)|\(styleKey)"
     }
 
     static func lineCount(_ text: String) -> Int {
@@ -157,6 +157,17 @@ enum TranscriptRenderer {
         item.kind == .user
             && (item.text.count > TranscriptMetrics.collapseChars
                 || lineCount(item.text) > TranscriptMetrics.collapseLines)
+    }
+
+    /// Thinking / tool-call rows are ALWAYS collapsible (not length-gated):
+    /// they are metadata and start collapsed to a one-line header.
+    static func isMetaRow(_ item: TranscriptItem) -> Bool {
+        item.kind == .thinking || item.kind == .toolCall
+    }
+
+    /// A row that exposes the footer expand/collapse control.
+    static func isCollapsible(_ item: TranscriptItem) -> Bool {
+        isLongUserText(item) || isMetaRow(item)
     }
 
     static func collapsedPreview(_ text: String) -> String {
@@ -184,10 +195,39 @@ enum TranscriptRenderer {
             return MarkdownRenderer.plain(item.text, font: style.bodyFont, color: style.text)
         case .qa:
             return qaBody(item, style: style)
+        case .thinking, .toolCall:
+            return metaBody(item, expanded: expanded, style: style)
         case .question:
             // Hosted SwiftUI card (measured on main by the container).
             return NSAttributedString()
         }
+    }
+
+    /// Dim, metadata-style body for a thinking / tool-call row. Collapsed:
+    /// a one-line header ("Thinking" / "⚙ <toolName>"). Expanded: the header
+    /// plus the full content below in a smaller secondary colour (thinking is
+    /// italicised).
+    static func metaBody(_ item: TranscriptItem, expanded: Bool, style: TranscriptStyle) -> NSAttributedString {
+        let headerText: String
+        switch item.kind {
+        case .thinking: headerText = "Thinking"
+        case .toolCall: headerText = "⚙ " + (item.toolName ?? "tool")
+        default: headerText = ""
+        }
+        let headerFont = UIFont.systemFont(ofSize: max(11, style.bodyFont.pointSize * 0.9), weight: .semibold)
+        let out = NSMutableAttributedString(string: headerText,
+                                            attributes: [.font: headerFont, .foregroundColor: style.secondaryText])
+        guard expanded, item.text.hasVisibleCharacters else { return out }
+        let bodySize = max(11, style.bodyFont.pointSize * 0.9)
+        let bodyFont: UIFont
+        if item.kind == .thinking {
+            bodyFont = UIFont.italicSystemFont(ofSize: bodySize)
+        } else {
+            bodyFont = UIFont.monospacedSystemFont(ofSize: bodySize, weight: .regular)
+        }
+        out.append(NSAttributedString(string: "\n" + item.text,
+                                      attributes: [.font: bodyFont, .foregroundColor: style.secondaryText]))
+        return out
     }
 
     /// Q&A card body: "Q: …" in the secondary color, "A: …" in the primary
@@ -255,7 +295,10 @@ enum TranscriptRenderer {
     }
 
     static func footerTitle(for item: TranscriptItem, expanded: Bool) -> String {
-        expanded ? "Show less" : "Show all \(lineCount(item.text)) lines"
+        if isMetaRow(item) {
+            return expanded ? "Hide" : "Show details"
+        }
+        return expanded ? "Show less" : "Show all \(lineCount(item.text)) lines"
     }
 
     /// Pure, thread-safe layout for a row at a given table width.
@@ -366,6 +409,21 @@ enum TranscriptRenderer {
             l.drawWidth = maxText
             l.chunks = place(chunks, in: l.text)
             l.height = l.bubble.maxY + M.vPad
+        case .thinking, .toolCall:
+            // Left-aligned metadata row (no bubble). Always collapsible: a
+            // footer "Show details" / "Hide" sits below the header/body.
+            let maxText = max(20, width - 2 * M.hPad - M.assistantLeading - M.assistantTrailingMin)
+            let (size, chunks) = measureBlock(body, maxWidth: maxText)
+            l.text = CGRect(x: M.hPad + M.assistantLeading, y: M.vPad, width: size.width, height: size.height)
+            l.drawWidth = maxText
+            l.chunks = place(chunks, in: l.text)
+            var bottom = l.text.maxY
+            let title = footerTitle(for: item, expanded: expanded)
+            let titleWidth = ceil((title as NSString).size(withAttributes: [.font: style.footerFont]).width)
+            l.footer = CGRect(x: M.hPad + M.assistantLeading, y: bottom + M.footerGap,
+                              width: titleWidth + 24, height: M.footerHeight)
+            bottom = l.footer.maxY
+            l.height = bottom + M.vPad
         case .question:
             // Never laid out here: the container measures the hosted card.
             l.height = 0
@@ -383,15 +441,15 @@ enum TranscriptRenderer {
             body = self.body(for: job.item, expanded: job.expanded, style: style)
             cache.store(body, for: job.renderKey)
         }
-        let isLong = isLongUserText(job.item)
+        let collapsible = isCollapsible(job.item)
         let rowLayout = layout(for: job.item, body: body, width: width, expanded: job.expanded, style: style)
         // Slice segments here (off-main) so the cell only assigns them.
         let segments = rowLayout.chunks.map { body.attributedSubstring(from: $0.range) }
         return RowRender(renderKey: job.renderKey,
                          body: body,
                          layout: rowLayout,
-                         footerTitle: isLong ? footerTitle(for: job.item, expanded: job.expanded) : nil,
-                         isLong: isLong,
+                         footerTitle: collapsible ? footerTitle(for: job.item, expanded: job.expanded) : nil,
+                         isLong: collapsible,
                          segments: segments)
     }
 }
