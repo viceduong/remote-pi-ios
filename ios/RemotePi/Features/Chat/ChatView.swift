@@ -133,7 +133,7 @@ struct ChatView: View {
                                 fontSize: 17 * CGFloat(textScale))
         }
         .fullScreenCover(item: $openedImage) { target in
-            FullImageView(target: target, loader: viewModel.imageLoader)
+            FullImageView(target: target, images: viewModel.allImages, loader: viewModel.imageLoader)
         }
     }
 

@@ -121,6 +121,19 @@ final class ChatViewModel: ObservableObject {
     private let sessionId: String
     /// Session id for image attachment fetches (transcript cells key on it).
     var imageSessionId: String { sessionId }
+
+    /// §17: every attached user-message image, in transcript order — the gallery
+    /// the full-screen viewer swipes through.
+    var allImages: [FullImageTarget] {
+        var out: [FullImageTarget] = []
+        for m in messages where m.role == .user {
+            guard let entryId = m.entryId else { continue }
+            for ref in m.images {
+                out.append(FullImageTarget(entryId: entryId, index: ref.index))
+            }
+        }
+        return out
+    }
     /// Lazily created loader/cache for user-message image attachments. Shared
     /// by every transcript cell so the cache survives cell reuse.
     private(set) lazy var imageLoader = MessageImageLoader(fetcher: client, sessionId: sessionId)

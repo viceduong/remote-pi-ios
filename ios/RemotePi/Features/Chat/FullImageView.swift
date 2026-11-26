@@ -8,21 +8,71 @@ struct FullImageTarget: Identifiable, Equatable {
     var id: String { "\(entryId)/\(index)" }
 }
 
-/// Full-screen, pinch-to-zoom viewer for a message image. Loads the full-size
-/// bytes from the message-image endpoint (via the shared loader's cache first).
+/// Full-screen, swipeable gallery of the session's attached images. Opens at the
+/// tapped image and pages left/right through the rest; each page pinch/double-tap
+/// zooms. Falls back to a single image when no gallery list is supplied.
 struct FullImageView: View {
     let target: FullImageTarget
+    let images: [FullImageTarget]
     let loader: MessageImageLoader
     @Environment(\.dismiss) private var dismiss
+    @State private var selection: String
+
+    init(target: FullImageTarget, images: [FullImageTarget], loader: MessageImageLoader) {
+        self.target = target
+        // Ensure the tapped image is in the list (defensive: empty / stale list).
+        self.images = images.contains(target) ? images : [target]
+        self.loader = loader
+        _selection = State(initialValue: target.id)
+    }
+
+    private var currentIndex: Int { images.firstIndex { $0.id == selection } ?? 0 }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            Color.black.ignoresSafeArea()
+            TabView(selection: $selection) {
+                ForEach(images) { img in
+                    ImagePage(target: img, loader: loader).tag(img.id)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: images.count > 1 ? .automatic : .never))
+            .ignoresSafeArea()
+
+            HStack {
+                if images.count > 1 {
+                    Text("\(currentIndex + 1) / \(images.count)")
+                        .font(.footnote.monospacedDigit())
+                        .foregroundColor(.white.opacity(0.85))
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(.black.opacity(0.35), in: Capsule())
+                        .padding(.leading, 16)
+                }
+                Spacer()
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 30))
+                        .foregroundStyle(.white, .white.opacity(0.25))
+                        .padding(12)
+                }
+                .accessibilityLabel("Close")
+            }
+            .padding(.top, 4)
+        }
+    }
+}
+
+/// One zoomable page in the gallery; loads its own bytes (cache first).
+private struct ImagePage: View {
+    let target: FullImageTarget
+    let loader: MessageImageLoader
     @State private var image: UIImage?
     @State private var failed = false
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
             if let image {
-                ZoomableImage(image: image)
-                    .ignoresSafeArea()
+                ZoomableImage(image: image).ignoresSafeArea()
             } else if failed {
                 VStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle")
@@ -31,19 +81,6 @@ struct FullImageView: View {
                 .foregroundColor(.white.opacity(0.8))
             } else {
                 ProgressView().tint(.white)
-            }
-            VStack {
-                HStack {
-                    Spacer()
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 30))
-                            .foregroundStyle(.white, .white.opacity(0.25))
-                            .padding(12)
-                    }
-                    .accessibilityLabel("Close")
-                }
-                Spacer()
             }
         }
         .task {
