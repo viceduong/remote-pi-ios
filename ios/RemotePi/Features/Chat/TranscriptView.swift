@@ -87,6 +87,9 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
 
     /// Latest items from the view model (oldest → newest).
     private var latestItems: [TranscriptItem] = []
+    /// Ungrouped items as received; grouping (which depends on expand state) is
+    /// re-applied from these whenever a group is toggled.
+    private var rawItems: [TranscriptItem] = []
     /// Applied state.
     private var items: [String: TranscriptItem] = [:]
     private var order: [String] = []            // table order: newest first
@@ -239,7 +242,7 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
         tableView.backgroundColor = newStyle.background
         applyScrollButtonColors()
         renderAll = true
-        receive(latestItems)
+        receive(rawItems)
     }
 
     // MARK: Layout
@@ -262,7 +265,7 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
             lastWidth = size.width
             if !latestItems.isEmpty {
                 renderAll = true
-                receive(latestItems)
+                receive(rawItems)
             }
         }
         if pendingItems != nil { pumpRender() }
@@ -271,12 +274,48 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
     // MARK: Data flow
 
     private func receive(_ newItems: [TranscriptItem]) {
-        // Defensive: diffable data sources trap on duplicate identifiers.
+        rawItems = newItems
+        // Group consecutive tool calls (respecting which groups are expanded),
+        // then dedupe — diffable data sources trap on duplicate identifiers.
+        let grouped = groupToolCalls(newItems)
         var seen = Set<String>()
-        let unique = newItems.filter { seen.insert($0.id).inserted }
+        let unique = grouped.filter { seen.insert($0.id).inserted }
         latestItems = unique
         pendingItems = unique
         pumpRender()
+    }
+
+    /// Collapse runs of ≥2 consecutive `.toolCall` rows into one "N tool calls"
+    /// header row. When that group's id is expanded, emit the individual tool
+    /// rows instead (each still collapsed by default and individually
+    /// expandable). A lone tool call is always left as-is.
+    private func groupToolCalls(_ items: [TranscriptItem]) -> [TranscriptItem] {
+        var out: [TranscriptItem] = []
+        out.reserveCapacity(items.count)
+        var i = 0
+        while i < items.count {
+            guard items[i].kind == .toolCall else { out.append(items[i]); i += 1; continue }
+            var j = i
+            while j < items.count, items[j].kind == .toolCall { j += 1 }
+            let run = Array(items[i..<j])
+            if run.count == 1 {
+                out.append(run[0])
+            } else {
+                let groupId = "\(run[0].id)#group"
+                if expanded.contains(groupId) {
+                    // Expanded: show a header row then each call as its own row.
+                    out.append(TranscriptItem(id: groupId, kind: .toolCall, text: "",
+                                              entryId: run[0].entryId, toolName: "\(run.count) tool calls"))
+                    out.append(contentsOf: run)
+                } else {
+                    out.append(TranscriptItem(id: groupId, kind: .toolCall,
+                                              text: run.map { "⚙ \($0.toolName ?? "tool")" }.joined(separator: "\n"),
+                                              entryId: run[0].entryId, toolName: "\(run.count) tool calls"))
+                }
+            }
+            i = j
+        }
+        return out
     }
 
     private func pumpRender() {
@@ -580,7 +619,9 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
         if expanded.contains(id) { expanded.remove(id) } else { expanded.insert(id) }
         forceRender.insert(id)
         toggleAnchorId = id
-        receive(latestItems)
+        // Re-group from the raw items so expanding a tool-call group splits it
+        // into its individual rows (and collapsing merges them back).
+        receive(rawItems)
     }
 
     // MARK: UITableViewDelegate

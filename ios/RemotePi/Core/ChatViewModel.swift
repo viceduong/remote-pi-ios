@@ -399,7 +399,6 @@ final class ChatViewModel: ObservableObject {
                                                 showThinking: showThinking, showToolCalls: showToolCalls,
                                                 into: &items)
         }
-        items = ChatViewModel.groupToolCalls(items)
         var chipClientIds = Set<String>()
         for chip in reconciled.chips {
             if let cid = chip.item.clientMessageId { chipClientIds.insert(cid) }
@@ -505,35 +504,6 @@ final class ChatViewModel: ObservableObject {
                                             toolName: call.name))
             }
         }
-    }
-
-    /// Collapse runs of consecutive `.toolCall` rows into one grouped row
-    /// ("N tool calls", expandable to each call's name + details). A lone tool
-    /// call is left as-is. Stable id from the first member so expand state and
-    /// diffing survive new calls being appended to a growing group.
-    nonisolated static func groupToolCalls(_ items: [TranscriptItem]) -> [TranscriptItem] {
-        var out: [TranscriptItem] = []
-        out.reserveCapacity(items.count)
-        var i = 0
-        while i < items.count {
-            guard items[i].kind == .toolCall else { out.append(items[i]); i += 1; continue }
-            var j = i
-            while j < items.count, items[j].kind == .toolCall { j += 1 }
-            let run = items[i..<j]
-            if run.count == 1 {
-                out.append(items[i])
-            } else {
-                let body = run.map { item -> String in
-                    let name = item.toolName ?? "tool"
-                    return item.text.isEmpty ? "⚙ \(name)" : "⚙ \(name)\n\(item.text)"
-                }.joined(separator: "\n\n")
-                out.append(TranscriptItem(id: "\(items[i].id)#group", kind: .toolCall,
-                                          text: body, entryId: items[i].entryId,
-                                          toolName: "\(run.count) tool calls"))
-            }
-            i = j
-        }
-        return out
     }
 
     /// Transcript row for the pending questionnaire (stable id per request).
