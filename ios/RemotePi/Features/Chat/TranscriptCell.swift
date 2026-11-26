@@ -261,16 +261,16 @@ final class TranscriptCell: UITableViewCell {
         let isChip = item.kind == .queued || item.kind == .offline
         let hasHeader = isChip || item.kind == .qa
         headerIcon.isHidden = !hasHeader
-        headerLabel.isHidden = !hasHeader
+        // Chips show only the icon + action buttons; the status text label is
+        // dropped (Q&A rows still use the label).
+        headerLabel.isHidden = !hasHeader || isChip
         actionButton.isHidden = !(isChip && item.cancellable)
         steerButton.isHidden = !(item.kind == .queued && item.canSteer)
         if isChip {
             let tint = item.kind == .queued ? style.chipTint : style.secondaryText
             headerIcon.image = UIImage(systemName: item.kind == .queued ? "clock.arrow.circlepath" : "wifi.slash")
             headerIcon.tintColor = tint
-            headerLabel.text = item.statusText
-            headerLabel.font = style.headerFont
-            headerLabel.textColor = tint
+            headerLabel.text = nil
             actionButton.tintColor = style.secondaryText
             actionButton.accessibilityLabel = item.kind == .queued
                 ? "Cancel pending message" : "Discard unsent message"
