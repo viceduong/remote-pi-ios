@@ -29,6 +29,7 @@ struct ChatView: View {
     /// re-renders the chat screen.
     @State private var shells: BackgroundShellsModel
     @State private var showShells = false
+    @State private var openedImage: FullImageTarget?
 
     init(server: ServerConfig, session: SessionSummary) {
         self.server = server
@@ -131,11 +132,15 @@ struct ChatView: View {
             SelectableTextSheet(text: selection.text, theme: theme,
                                 fontSize: 17 * CGFloat(textScale))
         }
+        .fullScreenCover(item: $openedImage) { target in
+            FullImageView(target: target, loader: viewModel.imageLoader)
+        }
     }
 
     private var transcriptActions: TranscriptActions {
         let vm = viewModel
         let selection = $selectedText
+        let opened = $openedImage
         return TranscriptActions(
             loadMore: { vm.loadMore() },
             nearBottomChanged: { vm.setViewportNearBottom($0) },
@@ -145,7 +150,8 @@ struct ChatView: View {
                 if let uuid = UUID(uuidString: id) { vm.discardOffline(uuid) }
             },
             rewind: { entryId in vm.requestRewind(entryId: entryId) },
-            selectText: { text in selection.wrappedValue = SelectableText(text: text) }
+            selectText: { text in selection.wrappedValue = SelectableText(text: text) },
+            openImage: { entryId, index in opened.wrappedValue = FullImageTarget(entryId: entryId, index: index) }
         )
     }
 

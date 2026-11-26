@@ -112,6 +112,8 @@ final class TranscriptCell: UITableViewCell {
 
     var onAction: (() -> Void)?
     var onSteer: (() -> Void)?
+    /// Tapped an attached image: (entryId, image index).
+    var onImageTap: ((String, Int) -> Void)?
     var onToggleExpand: (() -> Void)?
 
     /// Row body is drawn as stacked segments.
@@ -163,6 +165,7 @@ final class TranscriptCell: UITableViewCell {
         super.prepareForReuse()
         onAction = nil
         onSteer = nil
+        onImageTap = nil
         onToggleExpand = nil
         // Free segment backing stores right away (the next row may be short).
         recycleAllSegments()
@@ -327,8 +330,11 @@ final class TranscriptCell: UITableViewCell {
             view.layer.cornerRadius = TranscriptMetrics.imageThumbCorner
             view.layer.cornerCurve = .continuous
             view.isAccessibilityElement = true
-            view.accessibilityTraits = .image
+            view.accessibilityTraits = [.image, .button]
             view.accessibilityLabel = "Attached image"
+            view.isUserInteractionEnabled = true
+            view.tag = imageViews.count // index among this row's images
+            view.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(imageTapped(_:))))
             contentView.addSubview(view)
             imageViews.append(view)
         }
@@ -535,5 +541,9 @@ final class TranscriptCell: UITableViewCell {
 
     @objc private func actionTapped() { onAction?() }
     @objc private func steerTapped() { onSteer?() }
+    @objc private func imageTapped(_ g: UITapGestureRecognizer) {
+        guard let entryId = imageEntryId, let idx = g.view?.tag, idx < imageRefs.count else { return }
+        onImageTap?(entryId, imageRefs[idx].index)
+    }
     @objc private func footerTapped() { onToggleExpand?() }
 }

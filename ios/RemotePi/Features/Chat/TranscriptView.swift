@@ -11,6 +11,8 @@ struct TranscriptActions {
     var discardOffline: @MainActor (String) -> Void = { _ in }
     var rewind: @MainActor (String) -> Void = { _ in }
     var selectText: @MainActor (String) -> Void = { _ in }
+    /// Open an attached image full-screen: (entryId, image index).
+    var openImage: @MainActor (String, Int) -> Void = { _, _ in }
     /// The inline question row (newest row) came on / went off screen.
 }
 
@@ -435,6 +437,7 @@ final class TranscriptContainerView: UIView, UITableViewDelegate {
                        imageLoader: imageLoader)
         cell.onAction = { [weak self] in self?.performRowAction(id: id) }
         cell.onSteer = { [weak self] in self?.performSteer(id: id) }
+        cell.onImageTap = { [weak self] entryId, index in self?.actions.openImage(entryId, index) }
         cell.onToggleExpand = { [weak self] in self?.toggleExpanded(id: id) }
     }
 
