@@ -276,18 +276,21 @@ final class ActivityAndQATests: XCTestCase {
         XCTAssertEqual(message.role, .tool)
         XCTAssertEqual(message.qa?.items.first?.answer, "Blue — dark")
         XCTAssertTrue(ChatMessage.isVisibleInFocus(message))
+        // `displayable` keeps all rows now (tool-row visibility is decided at
+        // transcript-build time); the QA row still becomes a .qa item below.
         XCTAssertEqual(ChatViewModel.displayable([message]).count, 1)
         let item = ChatViewModel.transcriptItem(for: message, streaming: false)
         XCTAssertEqual(item.kind, .qa)
         XCTAssertEqual(item.text, "Q: Color?\nA: Blue — dark")
         XCTAssertEqual(item.statusText, "Answered")
 
-        // A plain tool row and a malformed `qa` stay hidden (and never fail the page).
+        // A plain tool row with a malformed `qa` has no Q&A payload and is not
+        // visible in focus; it is only ever surfaced by the "Show tool calls"
+        // toggle (gated at transcript-build time), so `displayable` keeps it.
         let bad = #"{"id":"e10","role":"tool","toolName":"ask_user_question","text":"x","qa":"nope"}"#
         let hidden = try JSONDecoder().decode(WireMessage.self, from: Data(bad.utf8)).toChatMessage()
         XCTAssertNil(hidden.qa)
         XCTAssertFalse(ChatMessage.isVisibleInFocus(hidden))
-        XCTAssertTrue(ChatViewModel.displayable([hidden]).isEmpty)
     }
 
     func testQARowFromSSEMergesWithServerCopy() throws {
