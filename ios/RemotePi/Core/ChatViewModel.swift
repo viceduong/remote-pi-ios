@@ -347,10 +347,14 @@ final class ChatViewModel: ObservableObject {
 
     /// Derive visible rows, chips and banners from the model. Runs at most
     /// once per main-loop turn; never runs during a SwiftUI `body`.
+    /// Per-session visibility keys for thinking / tool-call rows.
+    static func showThinkingKey(_ sessionId: String) -> String { "showThinking.\(sessionId)" }
+    static func showToolCallsKey(_ sessionId: String) -> String { "showToolCalls.\(sessionId)" }
+
     func commitNow() {
         commitScheduled = false
-        let showThinking = UserDefaults.standard.bool(forKey: "showThinking")
-        let showToolCalls = UserDefaults.standard.bool(forKey: "showToolCalls")
+        let showThinking = UserDefaults.standard.bool(forKey: Self.showThinkingKey(sessionId))
+        let showToolCalls = UserDefaults.standard.bool(forKey: Self.showToolCallsKey(sessionId))
         // Tool-result rows (role .tool, not Q&A) are normally hidden; they
         // become visible (as collapsible `.toolCall` rows) only when the
         // "Show tool calls" setting is on.
@@ -665,7 +669,7 @@ final class ChatViewModel: ObservableObject {
     /// Note whether a page comes from a §13 server, then prepare its rows.
     private func historyRows(_ page: [ChatMessage]) -> [ChatMessage] {
         if !serverKeyed, page.contains(where: { $0.key != nil }) { serverKeyed = true }
-        return ChatViewModel.prepareHistory(page, showToolCalls: UserDefaults.standard.bool(forKey: "showToolCalls"))
+        return ChatViewModel.prepareHistory(page, showToolCalls: UserDefaults.standard.bool(forKey: Self.showToolCallsKey(sessionId)))
     }
 
     /// Delta refresh by entry-id cursor. Coalesced: concurrent callers share

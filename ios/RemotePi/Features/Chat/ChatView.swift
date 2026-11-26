@@ -15,8 +15,9 @@ struct ChatView: View {
     let session: SessionSummary
     private let client: APIClient
     @AppStorage("chatTextScale") private var textScale: Double = 1.0
-    @AppStorage("showThinking") private var showThinking = false
-    @AppStorage("showToolCalls") private var showToolCalls = false
+    /// Per-session thinking / tool-call visibility (keyed by session id).
+    @State private var showThinking = false
+    @State private var showToolCalls = false
     @Environment(\.theme) private var theme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.scenePhase) private var scenePhase
@@ -75,6 +76,8 @@ struct ChatView: View {
                 HStack(spacing: 12) {
                     ChatActionsMenu(shells: shells,
                                     workdir: session.workdir,
+                                    showThinking: $showThinking,
+                                    showToolCalls: $showToolCalls,
                                     onRewind: { viewModel.requestRewind(entryId: nil) },
                                     onShowShells: { showShells = true })
                     ToolbarStatusControl(status: viewModel.status,
@@ -85,10 +88,21 @@ struct ChatView: View {
         }
         .task { await viewModel.start() }
         // §16 shells poll (10 s) + activity watch; idempotent per appear.
-        .onAppear { shells.start(observing: viewModel.status) }
-        // Thinking / tool-call visibility toggles rebuild the transcript at once.
-        .onChange(of: showThinking) { _ in viewModel.commitNow() }
-        .onChange(of: showToolCalls) { _ in viewModel.commitNow() }
+        .onAppear {
+            shells.start(observing: viewModel.status)
+            // Load this session's saved thinking / tool-call visibility.
+            showThinking = UserDefaults.standard.bool(forKey: ChatViewModel.showThinkingKey(session.id))
+            showToolCalls = UserDefaults.standard.bool(forKey: ChatViewModel.showToolCallsKey(session.id))
+        }
+        // Persist per session + rebuild the transcript at once.
+        .onChange(of: showThinking) { v in
+            UserDefaults.standard.set(v, forKey: ChatViewModel.showThinkingKey(session.id))
+            viewModel.commitNow()
+        }
+        .onChange(of: showToolCalls) { v in
+            UserDefaults.standard.set(v, forKey: ChatViewModel.showToolCallsKey(session.id))
+            viewModel.commitNow()
+        }
         .onChange(of: scenePhase) { phase in
             // Only a real background transition suspends the network:
             // `.inactive` (control centre, app switcher peek, alerts) must not

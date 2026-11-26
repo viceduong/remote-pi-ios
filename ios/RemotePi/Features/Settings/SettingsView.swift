@@ -19,8 +19,6 @@ struct SettingsView: View {
     let servers: [ServerConfig]
     @AppStorage("chatTextScale") private var textScale: Double = 1.0
     @AppStorage("themeName") private var themeName = "darkGrey"
-    @AppStorage("showThinking") private var showThinking = false
-    @AppStorage("showToolCalls") private var showToolCalls = false
     @Environment(\.dismiss) private var dismiss
 
     init(servers: [ServerConfig] = []) {
@@ -45,16 +43,6 @@ struct SettingsView: View {
                     Text("Chat text size")
                 } footer: {
                     Text("Applies to messages, tool output and thinking blocks.")
-                }
-
-                Section {
-                    Toggle("Show thinking", isOn: $showThinking)
-                    Toggle("Show tool calls", isOn: $showToolCalls)
-                } header: {
-                    Text("Transcript")
-                } footer: {
-                    Text("Thinking blocks and tool calls are hidden by default. "
-                         + "When shown, each row is collapsed — tap to expand.")
                 }
 
                 Section {

@@ -115,12 +115,21 @@ struct BackgroundNoticeBanner: View {
 struct ChatActionsMenu: View {
     @ObservedObject var shells: BackgroundShellsModel
     let workdir: String?
+    @Binding var showThinking: Bool
+    @Binding var showToolCalls: Bool
     let onRewind: @MainActor () -> Void
     let onShowShells: @MainActor () -> Void
 
     var body: some View {
         let running = shells.showsMenuEntry ? shells.runningCount : 0
         Menu {
+            Toggle(isOn: $showThinking) {
+                Label("Show thinking", systemImage: "brain")
+            }
+            Toggle(isOn: $showToolCalls) {
+                Label("Show tool calls", systemImage: "wrench.and.screwdriver")
+            }
+            Divider()
             Button {
                 onRewind()
             } label: {
