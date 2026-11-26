@@ -125,7 +125,8 @@ final class BackgroundShellsSnapshotTests: XCTestCase {
             let view = HStack(spacing: 12) {
                 ChatActionsMenu(shells: model, workdir: "/Users/pi/projects/remote-pi",
                                 showThinking: .constant(false), showToolCalls: .constant(false),
-                                onRewind: {}, onShowShells: {})
+                                thinkingLevel: "medium", thinkingLevels: ChatViewModel.thinkingLevels,
+                                onSetThinkingLevel: { _ in }, onRewind: {}, onShowShells: {})
             }
             .font(.title3)
             .foregroundColor(theme.accent)

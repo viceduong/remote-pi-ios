@@ -342,6 +342,19 @@ struct APIClient {
         try await postNoResponse("/api/sessions/\(id)/models/cycle")
     }
 
+    /// §11: set the reasoning/thinking level (off/minimal/low/medium/high/xhigh).
+    func setThinkingLevel(_ id: String, level: String) async throws {
+        struct Req: Encodable { let level: String }
+        _ = try await send(makeRequest("/api/sessions/\(id)/thinking", method: "POST", body: Req(level: level)))
+    }
+
+    /// The session's current reasoning level from `GET /state` (nil if unknown).
+    func fetchThinkingLevel(_ id: String) async throws -> String? {
+        struct Resp: Decodable { struct State: Decodable { let thinkingLevel: String? }; let state: State? }
+        let data = try await send(makeRequest("/api/sessions/\(id)/state"))
+        return (try? JSONDecoder().decode(Resp.self, from: data))?.state?.thinkingLevel
+    }
+
     func fetchQueue(_ id: String) async throws -> [QueueItem] {
         struct Wrapper: Decodable { let items: [QueueItem] }
         let wrapper: Wrapper = try await get("/api/sessions/\(id)/queue")

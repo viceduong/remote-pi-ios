@@ -26,11 +26,13 @@ struct FullImageView: View {
         _selection = State(initialValue: target.id)
     }
 
+    @State private var dragY: CGFloat = 0
+
     private var currentIndex: Int { images.firstIndex { $0.id == selection } ?? 0 }
 
     var body: some View {
         ZStack(alignment: .top) {
-            Color.black.ignoresSafeArea()
+            Color.black.opacity(1 - min(Double(abs(dragY)) / 400, 0.6)).ignoresSafeArea()
             TabView(selection: $selection) {
                 ForEach(images) { img in
                     ImagePage(target: img, loader: loader).tag(img.id)
@@ -38,6 +40,20 @@ struct FullImageView: View {
             }
             .tabViewStyle(.page(indexDisplayMode: images.count > 1 ? .automatic : .never))
             .ignoresSafeArea()
+            .offset(y: dragY)
+            // Swipe down to dismiss. Lower-priority gesture so the TabView's
+            // horizontal paging wins for sideways swipes; we only track
+            // vertical-dominant drags. Snaps back if the drag is too small.
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 20)
+                    .onChanged { v in
+                        if abs(v.translation.height) > abs(v.translation.width) + 10 { dragY = v.translation.height }
+                    }
+                    .onEnded { v in
+                        if dragY > 120 { dismiss() }
+                        else { withAnimation(.spring(response: 0.3)) { dragY = 0 } }
+                    }
+            )
 
             HStack {
                 if images.count > 1 {

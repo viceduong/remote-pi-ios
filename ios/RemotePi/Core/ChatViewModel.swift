@@ -70,6 +70,9 @@ final class ChatViewModel: ObservableObject {
     /// updated by `model_changed` frames, `GET /models` `current` and
     /// successful (optimistically applied) switches.
     @Published private(set) var currentModel: ModelRef?
+    /// §11: reasoning level (off/minimal/low/medium/high/xhigh); nil until known.
+    @Published private(set) var thinkingLevel: String?
+    static let thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh"]
     @Published private(set) var modelList: ModelListState = .idle
 
     // MARK: Outputs for focused observers
@@ -1398,6 +1401,31 @@ final class ChatViewModel: ObservableObject {
 
     /// Fetch `GET /models`. A refresh keeps the previous list visible; a
     /// failure with no list yet shows the error state (retry from the sheet).
+    /// Fetch the current reasoning level (on open / menu appear).
+    func loadThinkingLevel() {
+        spawn { [weak self] in
+            guard let self else { return }
+            if let level = try? await self.client.fetchThinkingLevel(self.sessionId) {
+                self.thinkingLevel = level
+            }
+        }
+    }
+
+    /// §11: set the reasoning level (optimistic; reverts on failure).
+    func setThinkingLevel(_ level: String) {
+        let previous = thinkingLevel
+        thinkingLevel = level
+        spawn { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.client.setThinkingLevel(self.sessionId, level: level)
+            } catch {
+                self.thinkingLevel = previous
+                self.surface(error)
+            }
+        }
+    }
+
     func loadModels() {
         guard !modelsLoadInFlight else { return }
         modelsLoadInFlight = true

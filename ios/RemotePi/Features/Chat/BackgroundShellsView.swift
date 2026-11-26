@@ -117,6 +117,9 @@ struct ChatActionsMenu: View {
     let workdir: String?
     @Binding var showThinking: Bool
     @Binding var showToolCalls: Bool
+    let thinkingLevel: String?
+    let thinkingLevels: [String]
+    let onSetThinkingLevel: @MainActor (String) -> Void
     let onRewind: @MainActor () -> Void
     let onShowShells: @MainActor () -> Void
 
@@ -128,6 +131,21 @@ struct ChatActionsMenu: View {
             }
             Toggle(isOn: $showToolCalls) {
                 Label("Show tool calls", systemImage: "wrench.and.screwdriver")
+            }
+            Menu {
+                ForEach(thinkingLevels, id: \.self) { level in
+                    Button {
+                        onSetThinkingLevel(level)
+                    } label: {
+                        if level == thinkingLevel {
+                            Label(level.capitalized, systemImage: "checkmark")
+                        } else {
+                            Text(level.capitalized)
+                        }
+                    }
+                }
+            } label: {
+                Label("Thinking level\(thinkingLevel.map { ": \($0.capitalized)" } ?? "")", systemImage: "gauge.with.dots.needle.33percent")
             }
             Divider()
             Button {

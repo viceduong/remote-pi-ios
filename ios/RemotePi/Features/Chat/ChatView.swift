@@ -79,6 +79,9 @@ struct ChatView: View {
                                     workdir: session.workdir,
                                     showThinking: $showThinking,
                                     showToolCalls: $showToolCalls,
+                                    thinkingLevel: viewModel.thinkingLevel,
+                                    thinkingLevels: ChatViewModel.thinkingLevels,
+                                    onSetThinkingLevel: { viewModel.setThinkingLevel($0) },
                                     onRewind: { viewModel.requestRewind(entryId: nil) },
                                     onShowShells: { showShells = true })
                     ToolbarStatusControl(status: viewModel.status,
@@ -94,6 +97,7 @@ struct ChatView: View {
             // Load this session's saved thinking / tool-call visibility.
             showThinking = UserDefaults.standard.bool(forKey: ChatViewModel.showThinkingKey(session.id))
             showToolCalls = UserDefaults.standard.bool(forKey: ChatViewModel.showToolCallsKey(session.id))
+            viewModel.loadThinkingLevel()
         }
         // Persist per session + rebuild the transcript at once.
         .onChange(of: showThinking) { v in
