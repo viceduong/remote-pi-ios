@@ -653,24 +653,23 @@ final class ChatViewModel: ObservableObject {
         lowestFetchedTs = min(lowestFetchedTs ?? Int.max, low)
     }
 
-    /// Tool-result rows are kept in the store (so the "Show tool calls" toggle
-    /// can surface them instantly without a refetch); whether they are actually
-    /// RENDERED is decided per-row at transcript-build time (`visibleMessages`
-    /// + `appendTranscriptItems`). Q&A rows (contract §9) are always kept.
+    /// Tool rows are normally kept out of the model entirely. Exceptions:
+    /// Q&A rows (contract §9), always kept; and, when `showToolCalls` is on,
+    /// tool-result rows too (surfaced as collapsible `.toolCall` rows).
     nonisolated static func displayable(_ rows: [ChatMessage], showToolCalls: Bool = false) -> [ChatMessage] {
-        rows
+        rows.filter { $0.role != .tool || $0.qa != nil || showToolCalls }
     }
 
-    /// History rows as stored: with an identity (server `key`, else the derived
-    /// pre-§13 key — see `identified`).
+    /// History rows as stored: displayable, with an identity (server `key`,
+    /// else the derived pre-§13 key — see `identified`).
     nonisolated static func prepareHistory(_ rows: [ChatMessage], showToolCalls: Bool = false) -> [ChatMessage] {
-        rows.map { identified($0, key: nil) }
+        displayable(rows, showToolCalls: showToolCalls).map { identified($0, key: nil) }
     }
 
     /// Note whether a page comes from a §13 server, then prepare its rows.
     private func historyRows(_ page: [ChatMessage]) -> [ChatMessage] {
         if !serverKeyed, page.contains(where: { $0.key != nil }) { serverKeyed = true }
-        return ChatViewModel.prepareHistory(page)
+        return ChatViewModel.prepareHistory(page, showToolCalls: UserDefaults.standard.bool(forKey: Self.showToolCallsKey(sessionId)))
     }
 
     /// Delta refresh by entry-id cursor. Coalesced: concurrent callers share
@@ -1912,13 +1911,14 @@ final class ChatViewModel: ObservableObject {
             store.upsertLive(ChatViewModel.identified(qaRow, key: key))
             return
         }
+        if ChatViewModel.isToolMessage(msg) {
+            status.apply(.activity(nil))
+            return
+        }
         let row = ChatViewModel.identified(ChatViewModel.mapped(obj, msg), key: key)
         switch row.role {
         case .tool:
-            // Keep live tool-result rows in the store so the "Show tool calls"
-            // toggle can surface them without a refetch (display is gated at
-            // transcript-build time, not here).
-            store.upsertLive(row)
+            return
         case .user:
             store.upsertLive(row)
         case .assistant:
@@ -1986,11 +1986,11 @@ final class ChatViewModel: ObservableObject {
             store.upsertLive(ChatViewModel.identified(qaRow, key: key))
             return
         }
+        if ChatViewModel.isToolMessage(msg) { return }
         let row = ChatViewModel.mapped(obj, msg)
         switch row.role {
         case .tool:
-            // Keep the finalized tool-result row (gated at display time).
-            store.upsertLive(ChatViewModel.identified(row, key: key))
+            return
         case .user:
             store.upsertLive(ChatViewModel.identified(row, key: key))
         case .assistant:
