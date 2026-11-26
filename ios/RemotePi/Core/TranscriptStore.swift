@@ -162,6 +162,18 @@ struct TranscriptStore {
         }
     }
 
+    /// §11: update the in-progress assistant row's thinking / tool calls from a
+    /// streaming partial (text stays delta-accumulated). Lets those blocks render
+    /// live instead of only on message_end.
+    mutating func updateStreamingMeta(thinking: String?, toolCalls: [ToolCall]) {
+        guard let id = inProgressId, let i = position(ofId: id) else { return }
+        var row = rows[i]
+        var changed = false
+        if let thinking, thinking != row.thinking { row.thinking = thinking; changed = true }
+        if toolCalls != row.toolCalls { row.toolCalls = toolCalls; changed = true }
+        if changed { rows[i] = row; stamp(id) }
+    }
+
     private mutating func beginStreaming(at i: Int) {
         let id = rows[i].id
         if let current = inProgressId, current != id { supersede(current) }

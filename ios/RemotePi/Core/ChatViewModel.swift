@@ -480,9 +480,10 @@ final class ChatViewModel: ObservableObject {
             return
         }
         let main = transcriptItem(for: m, streaming: streaming)
-        // Only settled assistant rows carry thinking / tool calls; an error
-        // row has neither, so decorate only normal assistant text rows.
-        guard !streaming, main.kind == .assistant else {
+        // Decorate normal assistant rows (streaming or settled) with their
+        // thinking / tool-call rows so both stream live. Error rows carry
+        // neither, so pass them straight through.
+        guard main.kind == .assistant else {
             items.append(main)
             return
         }
@@ -490,7 +491,10 @@ final class ChatViewModel: ObservableObject {
             items.append(TranscriptItem(id: "\(m.id)#think", kind: .thinking, text: thinking,
                                         entryId: m.entryId))
         }
-        if main.text.hasVisibleCharacters {
+        // Keep the streaming text row even before any text arrives, so its
+        // position is stable as text fills in; a settled empty text row is
+        // dropped (tool-only turns).
+        if main.text.hasVisibleCharacters || streaming {
             items.append(main)
         }
         if showToolCalls {
@@ -1977,6 +1981,14 @@ final class ChatViewModel: ObservableObject {
         if let msg, ChatViewModel.isToolMessage(msg) {
             status.apply(.activity(nil))
             return
+        }
+        // §11: stream thinking / tool calls live. The partial carries the
+        // accumulated blocks; patch the in-progress row (text is delta-fed).
+        if let msg {
+            let partial = ChatMessage.fromAgentMessage(msg)
+            if partial.role == .assistant {
+                store.updateStreamingMeta(thinking: partial.thinking, toolCalls: partial.toolCalls)
+            }
         }
         guard let ev = obj["assistantMessageEvent"] as? [String: Any] else {
             status.apply(.activity(nil))
